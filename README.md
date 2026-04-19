@@ -4,22 +4,14 @@ An [InvenTree](https://inventree.org) plugin that adds a large-tile gallery view
 
 ![Tile View Screenshot](https://raw.githubusercontent.com/integralmedia/inventree-part-tiles/main/docs/screenshot.png)
 
-## Features
-
-- Extra-large part image tiles in a responsive grid
-- Search and filter parts within the panel
-- Sort by name, IPN, stock, or custom parameter templates
-- Adjustable tile width with persistent preferences (localStorage)
-- Infinite scroll with lazy image loading
-- Group variant parts toggle
-- Works on Part Category pages
-
 ## Requirements
 
 - InvenTree ≥ 0.16.0
 - Python ≥ 3.10
 
-## Installation (Docker — recommended)
+---
+
+## Installation (Docker)
 
 This method clones the repo into the InvenTree data directory, which is already bind-mounted inside the container at `/home/inventree/data`. No changes to `docker-compose.yaml` are required.
 
@@ -30,13 +22,6 @@ Replace `/path/to/inventree/data/inventree-data` with the host path of your `inv
 ```bash
 git clone https://github.com/integralmedia/inventree-part-tiles.git \
     /path/to/inventree/data/inventree-data/inventree-part-tiles
-```
-
-Example for a default Docker Compose deployment under `/docker/applications/inventree`:
-
-```bash
-git clone https://github.com/integralmedia/inventree-part-tiles.git \
-    /docker/applications/inventree/data/inventree-data/inventree-part-tiles
 ```
 
 ### Step 2 — Add the plugin to `plugins.txt`
@@ -97,15 +82,90 @@ docker restart inventree-worker
 
 ---
 
-## Usage
+## Features & Usage
 
-1. Navigate to any **Part Category** in InvenTree.
-2. A **Tile View** panel will appear alongside the default panels.
-3. Use the toolbar to search, sort, adjust tile size, and configure displayed fields.
+Navigate to any **Part Category** in InvenTree. The **Tile View** panel appears alongside the standard panels. All preferences are saved per-browser in `localStorage` and restored automatically on your next visit.
 
-## Configuration
+### Tile Grid
 
-No additional configuration is required. Preferences (tile width, displayed fields, etc.) are stored per-browser in `localStorage` under the key `inventree_tileview_prefs`.
+Parts are displayed as image cards in a responsive grid. Each card shows the part image (or a placeholder if none is set), and whichever fields are enabled in the **Display** panel. Clicking a card or its image navigates to the part detail page.
+
+### Search
+
+Type in the search box to filter parts by name, IPN, or description. Results update automatically after a short debounce delay — no need to press Enter.
+
+### Sort
+
+Use the sort dropdown to order parts by:
+
+| Option | Description |
+|---|---|
+| Name A→Z / Z→A | Alphabetical by full part name |
+| IPN A→Z / Z→A | Alphabetical by Internal Part Number |
+| Stock ↓ / ↑ | Highest or lowest stock quantity first |
+| Newest / Oldest | By creation date |
+
+### Filters
+
+Click **Filters** to open the filter panel. Each filter pill cycles through three states:
+
+- **Off** (default) — no filter applied
+- **Blue (Yes)** — only show parts where this is true
+- **Red (No)** — only show parts where this is false
+
+Available filters: **Active**, **Assembly**, **Component**, **Purchaseable**, **Salable**, **Trackable**, **Virtual**, **Has Stock**, **Templates only**.
+
+Multiple filters can be active simultaneously. Filters combine with any active search.
+
+### Display Options
+
+Click **Display** to choose which fields appear on each tile:
+
+| Field | Description |
+|---|---|
+| Name | Full part name (always recommended) |
+| IPN | Internal Part Number |
+| Description | Part description text |
+| Stock | Current stock quantity. Shows total rollup stock for template parts |
+| Category | The part category name |
+| Revision | Part revision identifier |
+| Active badge | Shows an Active or Inactive badge on each tile |
+
+Changes take effect instantly without reloading data.
+
+### Tile Size
+
+The **Size** slider in the toolbar adjusts tile width from 120 px to 340 px. The grid reflows automatically. Your preferred size is saved and restored on your next visit.
+
+### Hover Popover
+
+Hovering over a tile for ~320 ms shows a popover with additional detail:
+
+- Full part name, IPN, and description
+- Category
+- Stock quantity (with units if set)
+- Default stock location
+- Live breakdown of stock quantities by location (fetched on demand and cached)
+
+Move the mouse onto the popover itself to keep it visible while you read it.
+
+### Group Variants
+
+Enable **Group variants** in the **Display** panel to collapse template parts and their variants into a single tile. The template card shows a stacked-layers overlay icon, and its variants are listed below the image with their individual stock quantities. Variants that belong to a template not present in the current category are shown as standalone tiles.
+
+This mode performs a single bulk fetch of all parts in the category rather than paginated fetches, and sorts them client-side according to the selected sort order.
+
+### Custom Parameter Columns
+
+The **Display** panel dynamically loads all parameter templates defined in your InvenTree instance. Each appears as a toggleable pill under the **Parameters** section. Enabling a parameter fetches its values for all loaded parts and displays them on each tile. Multiple parameters can be shown simultaneously.
+
+Parameter values are fetched once and cached for the session — switching a parameter off and back on does not re-fetch.
+
+### Infinite Scroll
+
+In normal (non-grouped) mode, parts load 48 at a time. As you scroll toward the bottom, the next page is fetched automatically. A status bar above the grid shows how many parts are currently visible out of the total matching the current search and filters.
+
+---
 
 ## License
 

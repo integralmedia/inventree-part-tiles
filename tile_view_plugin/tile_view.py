@@ -3,7 +3,7 @@ from plugin.mixins import UserInterfaceMixin
 
 
 class PartTilePlugin(UserInterfaceMixin, InvenTreePlugin):
-    NAME = "LargeTileView"
+    NAME = "Part Tile View"
     SLUG = "tileview"
     TITLE = "Part Tile View"
     AUTHOR = "Integral Media Inc."

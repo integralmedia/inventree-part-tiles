@@ -1082,5 +1082,22 @@ class TileView {
 
 export async function renderPanel(target, data) {
   if (!target) return;
-  new TileView(target, data?.id).init();
+  try {
+    new TileView(target, data?.id).init();
+  } catch (err) {
+    target.innerHTML = `
+      <div style="padding:24px;text-align:center;color:var(--mantine-color-dimmed,#888);font-family:inherit;">
+        <div style="font-size:2rem;margin-bottom:8px;">⚠️</div>
+        <div style="font-weight:600;margin-bottom:6px;color:var(--mantine-color-text,inherit);">Tile View failed to load</div>
+        <div style="font-size:0.85rem;margin-bottom:12px;">${err && err.message ? err.message : 'An unexpected error occurred.'}</div>
+        <div style="font-size:0.78rem;">
+          If static files are missing, run:<br>
+          <code style="background:var(--mantine-color-default,#f0f0f0);padding:2px 6px;border-radius:4px;">
+            docker exec inventree-server invoke static
+          </code>
+          <br>then reload the page.
+        </div>
+      </div>`;
+    console.error('[TileView] renderPanel error:', err);
+  }
 }
