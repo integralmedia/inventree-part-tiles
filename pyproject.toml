@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "inventree-part-tiles"
@@ -26,3 +26,6 @@ include = ["tile_view_plugin*"]
 
 [tool.setuptools.package-data]
 tile_view_plugin = ["templates/**/*", "static/**/*"]
+
+[project.entry-points."inventree_plugins"]
+PartTilePlugin = "tile_view_plugin.tile_view:PartTilePlugin"
