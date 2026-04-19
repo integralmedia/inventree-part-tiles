@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "inventree-part-tiles"
+version = "2.0.0"
+description = "InvenTree plugin: large-tile gallery view for part categories"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Grant Brennae" }]
+requires-python = ">=3.10"
+keywords = ["inventree", "plugin", "gallery", "tiles"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/integralmedia/inventree-part-tiles"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tile_view_plugin*"]
+
+[tool.setuptools.package-data]
+tile_view_plugin = ["templates/**/*", "static/**/*"]

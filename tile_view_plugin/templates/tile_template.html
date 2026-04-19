@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% load i18n %}
+{% load static %}
+
+{% block content %}
+<style>
+    .tile-container {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+        gap: 20px;
+        padding: 20px;
+    }
+    .part-tile {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        overflow: hidden;
+        background: #fff;
+        text-align: center;
+        padding-bottom: 10px;
+        transition: transform 0.2s;
+    }
+    .part-tile:hover { transform: scale(1.02); }
+    .tile-image {
+        width: 100%;
+        height: 200px; /* Custom large size */
+        object-fit: contain;
+        background: #f9f9f9;
+        border-bottom: 1px solid #eee;
+    }
+    .tile-name { font-weight: bold; margin-top: 10px; display: block; }
+</style>
+
+<div class="tile-container" id="tile-grid">
+    </div>
+
+<script>
+    // Fetch parts from the InvenTree API
+    fetch('/api/part/')
+        .then(response => response.json())
+        .then(data => {
+            const grid = document.getElementById('tile-grid');
+            data.forEach(part => {
+                const img = part.image ? part.image : '/static/img/blank_image.png';
+                grid.innerHTML += `
+                    <div class="part-tile">
+                        <a href="/part/${part.pk}/">
+                            <img src="${img}" class="tile-image">
+                            <span class="tile-name">${part.full_name}</span>
+                            <small>${part.IPN || ''}</small>
+                        </a>
+                    </div>
+                `;
+            });
+        });
+</script>
+{% endblock %}

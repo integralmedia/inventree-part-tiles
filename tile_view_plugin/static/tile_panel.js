@@ -1,0 +1,1086 @@
+/**
+ * InvenTree Tile View Panel
+ * Features: search, filters, sort, infinite scroll, lazy images, persistent display options
+ */
+
+const TV_PREFS_KEY = 'inventree_tileview_prefs';
+const TV_PAGE_SIZE = 48;
+const TV_DEBOUNCE_MS = 350;
+
+// ── Preferences (localStorage) ────────────────────────────────────────────────
+
+function tvDefaultPrefs() {
+  return { fields: ['name', 'IPN', 'in_stock'], tileWidth: 180, groupVariants: false, paramTemplates: [] };
+}
+
+function tvLoadPrefs() {
+  try {
+    const raw = localStorage.getItem(TV_PREFS_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      const merged = { ...tvDefaultPrefs(), ...saved };
+      // Ensure fields is always a non-empty array
+      if (!Array.isArray(merged.fields) || merged.fields.length === 0) {
+        merged.fields = tvDefaultPrefs().fields;
+      }
+      if (!Array.isArray(merged.paramTemplates)) merged.paramTemplates = [];
+      return merged;
+    }
+  } catch (_) {}
+  return tvDefaultPrefs();
+}
+
+function tvSavePrefs(p) {
+  try { localStorage.setItem(TV_PREFS_KEY, JSON.stringify(p)); } catch (_) {}
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
+function tvNavigateTo(path) {
+  window.history.pushState(null, '', path);
+  window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+}
+
+function tvEsc(val) {
+  if (val == null) return '';
+  return String(val)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function tvDebounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+// Transparent 1×1 SVG placeholder for lazy-loaded images
+const TV_BLANK = 'data:image/svg+xml,%3Csvg xmlns%3D%22http%3A//www.w3.org/2000/svg%22 width%3D%221%22 height%3D%221%22/%3E';
+
+// ── Card builder ──────────────────────────────────────────────────────────────
+
+function tvMakeCard(part, fields, extras = {}) {
+  const url = `/web/part/${part.pk}/details`;
+  // Use full-resolution image for tiles wider than 160 px to avoid pixelation
+  const imgSrc = (extras.tileWidth > 160 && part.image)
+    ? part.image
+    : (part.thumbnail || part.image || '/static/img/blank_image.png');
+
+  const card = document.createElement('div');
+  card.className = 'tv-card';
+  card._partData = part;  // stored for popover
+
+  const imgWrap = document.createElement('a');
+  imgWrap.href = url;
+  imgWrap.className = 'tv-img-wrap';
+  imgWrap.addEventListener('click', e => { e.preventDefault(); tvNavigateTo(url); });
+
+  const img = document.createElement('img');
+  img.src = TV_BLANK;
+  img.dataset.src = imgSrc;
+  img.className = 'tv-img';
+  img.alt = tvEsc(part.name || '');
+  imgWrap.appendChild(img);
+
+  // Group-head overlay icon — shown on template cards that have grouped variants
+  if (extras.isGroupHead) {
+    const ov = document.createElement('div');
+    ov.className = 'tv-group-overlay';
+    ov.title = 'Template with variants';
+    // Stacked-layers icon
+    ov.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 7l10 5 10-5-10-5zm0 7.27L5.24 6 12 2.73 18.76 6 12 9.27zm0 2.46L2 9l10 5 10-5-10-5zm0 7.27L5.24 13 12 9.73 18.76 13 12 16zm0 1.54L2 12l10 5 10-5-10-5z"/></svg>';
+    imgWrap.appendChild(ov);
+  }
+
+  card.appendChild(imgWrap);
+  card.appendChild(tvMakeBody(part, fields, url, extras));
+  return { card, img };
+}
+
+function tvMakeBody(part, fields, url, extras = {}) {
+  const body = document.createElement('div');
+  body.className = 'tv-body';
+
+  if (fields.includes('name')) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.className = 'tv-name';
+    a.textContent = part.full_name || part.name || '(no name)';
+    a.addEventListener('click', e => { e.preventDefault(); tvNavigateTo(url); });
+    body.appendChild(a);
+  }
+
+  if (fields.includes('IPN') && part.IPN) {
+    body.appendChild(tvField('IPN:', tvEsc(part.IPN)));
+  }
+
+  if (fields.includes('description') && part.description) {
+    const d = document.createElement('div');
+    d.className = 'tv-field tv-desc';
+    d.textContent = part.description;
+    body.appendChild(d);
+  }
+
+  if (fields.includes('in_stock')) {
+    // Templates hold no stock directly — total_in_stock rolls up all variant stock.
+    const raw     = part.is_template ? (part.total_in_stock ?? part.in_stock) : (part.in_stock ?? part.total_in_stock);
+    const qty     = parseFloat(raw) || 0;
+    const label   = part.is_template ? 'Total:' : 'Stock:';
+    const unitStr = part.units ? ` ${part.units}` : '';
+    const row     = tvField(label, tvEsc(String(qty) + unitStr));
+    row.classList.add(qty > 0 ? 'tv-stock-ok' : 'tv-stock-none');
+    body.appendChild(row);
+  }
+
+  // Show type badge; suppress Template badge in group mode (overlay icon used instead)
+  if (part.is_template && !extras.suppressTemplateBadge) {
+    const badge = document.createElement('span');
+    badge.className = 'tv-badge tv-badge-tmpl';
+    badge.textContent = 'Template';
+    body.appendChild(badge);
+  } else if (part.variant_of != null) {
+    const badge = document.createElement('span');
+    badge.className = 'tv-badge tv-badge-variant';
+    badge.textContent = 'Variant';
+    body.appendChild(badge);
+  }
+
+  if (fields.includes('category') && part.category_detail?.name) {
+    body.appendChild(tvField('Cat:', tvEsc(part.category_detail.name)));
+  }
+
+  if (fields.includes('revision') && part.revision) {
+    body.appendChild(tvField('Rev:', tvEsc(part.revision)));
+  }
+
+  if (fields.includes('active')) {
+    const badge = document.createElement('span');
+    badge.className = 'tv-badge ' + (part.active ? 'tv-badge-active' : 'tv-badge-inactive');
+    badge.textContent = part.active ? 'Active' : 'Inactive';
+    body.appendChild(badge);
+  }
+
+  // ── Custom parameters ──
+  const { paramTemplates = [], paramData, paramMeta } = extras;
+  if (paramTemplates.length > 0 && paramData && paramMeta) {
+    let firstParam = true;
+    paramTemplates.forEach(pk => {
+      const val = paramData.get(pk)?.get(part.pk);
+      if (val == null || val === '') return;
+      if (firstParam) {
+        const sep = document.createElement('div');
+        sep.className = 'tv-param-sep';
+        body.appendChild(sep);
+        firstParam = false;
+      }
+      const meta  = paramMeta.get(pk);
+      const label = meta
+        ? (meta.units ? `${meta.name} (${meta.units}):` : `${meta.name}:`)
+        : `Param ${pk}:`;
+      body.appendChild(tvField(label, tvEsc(val)));
+    });
+  }
+
+  return body;
+}
+
+function tvField(labelText, valueHtml) {
+  const div = document.createElement('div');
+  div.className = 'tv-field';
+  div.innerHTML = `<span class="tv-label">${labelText}</span> ${valueHtml}`;
+  return div;
+}
+
+// ── Grouped card (template + its variants) ────────────────────────────────────
+
+function tvMakeGroupedCard(template, variants, fields, extras = {}) {
+  // When variants exist, show overlay icon and hide the Template badge (overlay serves that purpose)
+  const headExtras = variants.length > 0
+    ? { ...extras, isGroupHead: true, suppressTemplateBadge: true }
+    : extras;
+  const { card, img } = tvMakeCard(template, fields, headExtras);
+  if (variants.length === 0) return { card, img };
+
+  const varList = document.createElement('div');
+  varList.className = 'tv-var-list';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'tv-var-hdr';
+  hdr.textContent = `${variants.length} variant${variants.length !== 1 ? 's' : ''}`;
+  varList.appendChild(hdr);
+
+  variants.forEach(v => {
+    const url = `/web/part/${v.pk}/details`;
+    const row = document.createElement('div');
+    row.className = 'tv-var-row';
+
+    const nameEl = document.createElement('a');
+    nameEl.href = url;
+    nameEl.className = 'tv-var-name';
+    nameEl.textContent = v.full_name || v.name || '(no name)';
+    nameEl.addEventListener('click', e => { e.preventDefault(); tvNavigateTo(url); });
+    row.appendChild(nameEl);
+
+    if (fields.includes('in_stock')) {
+      const qty     = parseFloat(v.in_stock ?? v.total_in_stock) || 0;
+      const unitStr = (v.units || template.units) ? ` ${v.units || template.units}` : '';
+      const stockEl = document.createElement('span');
+      stockEl.className = 'tv-var-stock ' + (qty > 0 ? 'tv-stock-ok' : 'tv-stock-none');
+      stockEl.textContent = String(qty) + unitStr;
+      row.appendChild(stockEl);
+    }
+
+    if (extras.onVariantHover) extras.onVariantHover(row, v);
+    varList.appendChild(row);
+  });
+
+  card.appendChild(varList);
+  return { card, img };
+}
+
+// ── Main controller ───────────────────────────────────────────────────────────
+
+class TileView {
+  constructor(root, categoryId) {
+    this.root       = root;
+    this.categoryId = categoryId;
+    this.prefs      = tvLoadPrefs();
+    this.state      = {
+      search: '', ordering: 'name', filters: {},
+      offset: 0, total: 0, loading: false, done: false,
+    };
+    this.parts              = [];          // cached for instant display-prefs redraws
+    this.paramData          = new Map();   // templatePk -> Map<modelId, data>
+    this.paramTemplatesMeta = new Map();  // templatePk -> template object
+    this.stockCache         = new Map();  // partPk -> stock items array
+    this.lazyObs   = null;
+    this.scrollObs = null;
+  }
+
+  init() {
+    // Clean up floating panels / popover from any previous render
+    [this.filterPanel, this.dispPanel, this.popover].forEach(el => {
+      if (el && el.parentElement === document.body) document.body.removeChild(el);
+    });
+    // Clear any previous render (React may call renderPanel more than once on the same target)
+    this.root.innerHTML = '';
+
+    this.injectStyles();
+    this.buildToolbar();
+    this.buildFilterPanel();
+    this.buildDispPanel();
+
+    this.statusEl = this.el('div', 'tv-status');
+    this.root.appendChild(this.statusEl);
+
+    this.grid = this.el('div', 'tv-grid');
+    this.grid.style.gridTemplateColumns =
+      `repeat(auto-fill, minmax(${this.prefs.tileWidth}px, 1fr))`;
+    this.root.appendChild(this.grid);
+
+    this.sentinel  = this.el('div', 'tv-sentinel');
+    this.root.appendChild(this.sentinel);
+
+    this.loadingEl = this.el('div', 'tv-loading-bar', 'Loading\u2026');
+    this.loadingEl.hidden = true;
+    this.root.appendChild(this.loadingEl);
+
+    this.initObservers();
+    this.initPopover();
+    this.loadPage();
+    this.loadParamTemplates(); // non-blocking; populates Display panel param pills
+  }
+
+  el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls)  e.className   = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  // ── Toolbar ────────────────────────────────────────────────────────────────
+
+  buildToolbar() {
+    const bar = this.el('div', 'tv-toolbar');
+
+    // Search
+    this.searchInput = document.createElement('input');
+    this.searchInput.type        = 'search';
+    this.searchInput.placeholder = 'Search parts\u2026';
+    this.searchInput.className   = 'tv-input tv-search';
+    const doSearch = tvDebounce(v => { this.state.search = v; this.reset(); }, TV_DEBOUNCE_MS);
+    this.searchInput.addEventListener('input', e => doSearch(e.target.value));
+    bar.appendChild(this.searchInput);
+
+    // Sort
+    const sortSel = document.createElement('select');
+    sortSel.className = 'tv-input tv-select';
+    [
+      ['name',           'Name A\u2192Z'],
+      ['-name',          'Name Z\u2192A'],
+      ['IPN',            'IPN A\u2192Z'],
+      ['-IPN',           'IPN Z\u2192A'],
+      ['-in_stock',      'Stock \u2193'],
+      ['in_stock',       'Stock \u2191'],
+      ['-creation_date', 'Newest'],
+      ['creation_date',  'Oldest'],
+    ].forEach(([val, label]) => {
+      const opt = document.createElement('option');
+      opt.value = val; opt.textContent = label;
+      if (val === this.state.ordering) opt.selected = true;
+      sortSel.appendChild(opt);
+    });
+    sortSel.addEventListener('change', e => { this.state.ordering = e.target.value; this.reset(); });
+    bar.appendChild(sortSel);
+
+    // Filters toggle
+    const filterBtn = this.el('button', 'tv-btn', 'Filters');
+    filterBtn.addEventListener('click', () => this.toggleDropdown(this.filterPanel, filterBtn));
+    bar.appendChild(filterBtn);
+
+    // Display options toggle
+    const dispBtn = this.el('button', 'tv-btn', 'Display');
+    dispBtn.addEventListener('click', () => this.toggleDropdown(this.dispPanel, dispBtn));
+    bar.appendChild(dispBtn);
+
+    // Tile size slider
+    const sizeWrap = this.el('div', 'tv-size-wrap');
+    sizeWrap.appendChild(this.el('span', 'tv-size-label', 'Size'));
+    const slider = document.createElement('input');
+    slider.type  = 'range';
+    slider.min   = 120; slider.max = 340; slider.step = 20;
+    slider.value = this.prefs.tileWidth;
+    slider.className = 'tv-slider';
+    slider.addEventListener('input', e => {
+      this.prefs.tileWidth = Number(e.target.value);
+      tvSavePrefs(this.prefs);
+      this.grid.style.gridTemplateColumns =
+        `repeat(auto-fill, minmax(${this.prefs.tileWidth}px, 1fr))`;
+    });
+    sizeWrap.appendChild(slider);
+    bar.appendChild(sizeWrap);
+
+    this.root.appendChild(bar);
+  }
+
+  // ── Filter panel ───────────────────────────────────────────────────────────
+  // Pills cycle: off → yes (blue) → no (red) → off
+  // off = no filter; yes = ?key=true; no = ?key=false
+
+  buildFilterPanel() {
+    this.filterPanel = this.el('div', 'tv-sub-panel');
+    this.filterPanel.hidden = true;
+    this.filterPanel.appendChild(this.el('span', 'tv-sub-label', 'Filters:'));
+
+    [
+      ['active',       'Active'],
+      ['assembly',     'Assembly'],
+      ['component',    'Component'],
+      ['purchaseable', 'Purchaseable'],
+      ['salable',      'Salable'],
+      ['trackable',    'Trackable'],
+      ['virtual',      'Virtual'],
+      ['has_stock',    'Has Stock'],
+      ['is_template',  'Templates only'],
+    ].forEach(([key, label]) => {
+      const pill = this.el('button', 'tv-pill', label);
+      pill.dataset.state = 'off';
+      pill.addEventListener('click', () => {
+        const cur  = pill.dataset.state;
+        const next = cur === 'off' ? 'yes' : cur === 'yes' ? 'no' : 'off';
+        pill.dataset.state = next;
+        pill.className = 'tv-pill' +
+          (next === 'yes' ? ' tv-pill-yes' : next === 'no' ? ' tv-pill-no' : '');
+        if (next === 'off') delete this.state.filters[key];
+        else this.state.filters[key] = (next === 'yes');
+        this.reset();
+      });
+      this.filterPanel.appendChild(pill);
+    });
+
+    // filterPanel is a floating dropdown — NOT appended to root
+  }
+
+  // ── Display options panel ──────────────────────────────────────────────────
+
+  buildDispPanel() {
+    this.dispPanel = this.el('div', 'tv-sub-panel');
+    this.dispPanel.hidden = true;
+    this.dispPanel.appendChild(this.el('span', 'tv-sub-label', 'Show on tiles:'));
+
+    [
+      ['name',        'Name'],
+      ['IPN',         'IPN'],
+      ['description', 'Description'],
+      ['in_stock',    'Stock'],
+      ['category',    'Category'],
+      ['revision',    'Revision'],
+      ['active',      'Active badge'],
+    ].forEach(([key, label]) => {
+      const on   = this.prefs.fields.includes(key);
+      const pill = this.el('button', 'tv-pill' + (on ? ' tv-pill-yes' : ''), label);
+      pill.addEventListener('click', () => {
+        const idx = this.prefs.fields.indexOf(key);
+        if (idx >= 0) {
+          this.prefs.fields.splice(idx, 1);
+          pill.className = 'tv-pill';
+        } else {
+          this.prefs.fields.push(key);
+          pill.className = 'tv-pill tv-pill-yes';
+        }
+        tvSavePrefs(this.prefs);
+        this.redrawExisting();   // instant — no API call
+      });
+      this.dispPanel.appendChild(pill);
+    });
+
+    // ── Group variants toggle (persisted) ──
+    const groupSep = this.el('span', 'tv-sub-sep');
+    this.dispPanel.appendChild(groupSep);
+
+    const groupOn = this.prefs.groupVariants;
+    const groupPill = this.el('button', 'tv-pill' + (groupOn ? ' tv-pill-yes' : ''), 'Group variants');
+    groupPill.title = 'Show one tile per template with its variants listed inside';
+    groupPill.addEventListener('click', () => {
+      this.prefs.groupVariants = !this.prefs.groupVariants;
+      groupPill.className = 'tv-pill' + (this.prefs.groupVariants ? ' tv-pill-yes' : '');
+      tvSavePrefs(this.prefs);
+      this.reset();
+    });
+    this.dispPanel.appendChild(groupPill);
+    // dispPanel is a floating dropdown — NOT appended to root
+    // Parameter pills are appended later by loadParamTemplates() once templates load
+  }
+
+  // ── Parameter template loading ─────────────────────────────────────────────
+
+  async loadParamTemplates() {
+    try {
+      const resp = await fetch(
+        '/api/parameter/template/?for_model=part&enabled=true&limit=500',
+        { credentials: 'include' }
+      );
+      if (!resp.ok) return;
+      const json = await resp.json();
+      const templates = Array.isArray(json) ? json : (json.results ?? []);
+      this.paramTemplatesMeta = new Map(templates.map(t => [t.pk, t]));
+      this.buildParamPills(templates);
+      // If the user had templates selected, fetch their data and re-render
+      if (this.prefs.paramTemplates.length > 0) {
+        await this.loadParamDataForTemplates(this.prefs.paramTemplates);
+        if (this.parts.length > 0) this.redrawExisting();
+      }
+    } catch (_) {}
+  }
+
+  buildParamPills(templates) {
+    if (templates.length === 0) return;
+    const sep = this.el('span', 'tv-sub-sep');
+    this.dispPanel.appendChild(sep);
+    this.dispPanel.appendChild(this.el('span', 'tv-sub-label', 'Parameters:'));
+    templates.forEach(tmpl => {
+      const on    = this.prefs.paramTemplates.includes(tmpl.pk);
+      const label = tmpl.units ? `${tmpl.name} (${tmpl.units})` : tmpl.name;
+      const pill  = this.el('button', 'tv-pill' + (on ? ' tv-pill-yes' : ''), label);
+      pill.addEventListener('click', async () => {
+        const idx = this.prefs.paramTemplates.indexOf(tmpl.pk);
+        if (idx >= 0) {
+          this.prefs.paramTemplates.splice(idx, 1);
+          pill.className = 'tv-pill';
+        } else {
+          this.prefs.paramTemplates.push(tmpl.pk);
+          pill.className = 'tv-pill tv-pill-yes';
+          pill.disabled = true;
+          await this.loadParamDataForTemplates([tmpl.pk]);
+          pill.disabled = false;
+        }
+        tvSavePrefs(this.prefs);
+        this.redrawExisting();
+      });
+      this.dispPanel.appendChild(pill);
+    });
+  }
+
+  async loadParamDataForTemplates(pks) {
+    const toFetch = pks.filter(pk => !this.paramData.has(pk));
+    if (toFetch.length === 0) return;
+    await Promise.all(toFetch.map(async pk => {
+      try {
+        const resp = await fetch(
+          `/api/parameter/?model_type=part&template=${pk}&limit=2000`,
+          { credentials: 'include' }
+        );
+        if (!resp.ok) return;
+        const json  = await resp.json();
+        const items = Array.isArray(json) ? json : (json.results ?? []);
+        this.paramData.set(pk, new Map(items.map(item => [item.model_id, item.data])));
+      } catch (_) {}
+    }));
+  }
+
+  // Returns the extras object passed to card builders
+  tvExtras() {
+    return {
+      paramTemplates: this.prefs.paramTemplates,
+      paramData:      this.paramData,
+      paramMeta:      this.paramTemplatesMeta,
+      tileWidth:      this.prefs.tileWidth,
+    };
+  }
+
+  // ── Dropdown panel management ──────────────────────────────────────────────
+
+  _cleanupPrev() {
+    [this.filterPanel, this.dispPanel, this.popover].forEach(el => {
+      if (el && el.parentElement === document.body) document.body.removeChild(el);
+    });
+  }
+
+  toggleDropdown(panel, btn) {
+    const isOpen = panel.parentElement === document.body && !panel.hidden;
+    [this.filterPanel, this.dispPanel].forEach(p => {
+      if (p !== panel && p && p.parentElement === document.body) document.body.removeChild(p);
+    });
+    if (isOpen) { if (panel.parentElement === document.body) document.body.removeChild(panel); return; }
+    const rect = btn.getBoundingClientRect();
+    const maxW = Math.min(680, window.innerWidth - 16);
+    let   left = rect.left;
+    if (left + maxW > window.innerWidth - 8) left = Math.max(8, window.innerWidth - maxW - 8);
+    panel.style.cssText =
+      `position:fixed;top:${rect.bottom + 4}px;left:${left}px;` +
+      `z-index:99999;max-width:${maxW}px;min-width:220px;`;
+    panel.hidden = false;
+    document.body.appendChild(panel);
+    const close = (e) => {
+      if (!panel.contains(e.target) && e.target !== btn) {
+        if (panel.parentElement === document.body) document.body.removeChild(panel);
+        panel.hidden = true;
+        document.removeEventListener('pointerdown', close, true);
+      }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', close, true), 10);
+  }
+
+  // ── Group-mode client-side sort ────────────────────────────────────────────
+
+  sortForGroup(parts) {
+    const desc  = this.state.ordering.startsWith('-');
+    const field = desc ? this.state.ordering.slice(1) : this.state.ordering;
+    const getVal = (p) => {
+      if (field === 'in_stock') {
+        return parseFloat(p.is_template ? (p.total_in_stock ?? p.in_stock) : (p.in_stock ?? 0)) || 0;
+      }
+      const v = p[field];
+      return v == null ? '' : v;
+    };
+    return [...parts].sort((a, b) => {
+      const av = getVal(a), bv = getVal(b);
+      const cmp = (typeof av === 'number' && typeof bv === 'number')
+        ? av - bv
+        : String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' });
+      return desc ? -cmp : cmp;
+    });
+  }
+
+  // ── Hover popover ──────────────────────────────────────────────────────────
+
+  initPopover() {
+    this.popover = document.createElement('div');
+    this.popover.className = 'tv-popover';
+    this.popover.hidden = true;
+    document.body.appendChild(this.popover);
+    this.popover.addEventListener('mouseenter', () => clearTimeout(this._popHideTimer));
+    this.popover.addEventListener('mouseleave', () => this.hidePopover());
+    this._popCurrentPk = null;
+  }
+
+  attachHoverEvents(card, part) {
+    card.addEventListener('mouseenter', () => {
+      clearTimeout(this._popHideTimer);
+      clearTimeout(this._popShowTimer);
+      this._popShowTimer = setTimeout(() => this.showPopover(card, part), 320);
+    });
+    card.addEventListener('mouseleave', (e) => {
+      clearTimeout(this._popShowTimer);
+      if (!this.popover || !this.popover.contains(e.relatedTarget)) this.hidePopover();
+    });
+  }
+
+  showPopover(card, part) {
+    if (!this.popover) return;
+    this._popCurrentPk = part.pk;
+    const rect = card.getBoundingClientRect();
+    const popW = 270;
+    let   left = rect.right + 10;
+    if (left + popW > window.innerWidth - 8) left = rect.left - popW - 10;
+    const top = Math.max(8, Math.min(rect.top, window.innerHeight - 340));
+    this.popover.style.cssText =
+      `position:fixed;top:${top}px;left:${Math.max(8, left)}px;z-index:99998;width:${popW}px;`;
+    this.popover.hidden = false;
+    this.renderPopoverContent(part, null);
+    this.loadStockForPopover(part);
+  }
+
+  hidePopover() {
+    this._popHideTimer = setTimeout(() => {
+      if (this.popover) this.popover.hidden = true;
+      this._popCurrentPk = null;
+    }, 120);
+  }
+
+  renderPopoverContent(part, stockItems) {
+    const url     = `/web/part/${part.pk}/details`;
+    const unitStr = part.units ? ` ${part.units}` : '';
+    const raw     = part.is_template ? (part.total_in_stock ?? part.in_stock) : (part.in_stock ?? 0);
+    const qty     = parseFloat(raw) || 0;
+
+    let html = `<div class="tv-pop-header">`;
+    html += `<a class="tv-pop-name" data-href="${tvEsc(url)}">${tvEsc(part.full_name || part.name)}</a>`;
+    html += `</div>`;
+    if (part.IPN) html += `<div class="tv-pop-ipn">${tvEsc(part.IPN)}</div>`;
+    if (part.description) html += `<div class="tv-pop-desc">${tvEsc(part.description)}</div>`;
+
+    html += `<div class="tv-pop-divider"></div><div class="tv-pop-rows">`;
+    if (part.category_detail?.name) {
+      html += `<div class="tv-pop-row"><span class="tv-pop-lbl">Category</span><span>${tvEsc(part.category_detail.name)}</span></div>`;
+    }
+    html += `<div class="tv-pop-row"><span class="tv-pop-lbl">${part.is_template ? 'Total stock' : 'Stock'}</span>`;
+    html += `<span class="${qty > 0 ? 'tv-stock-ok' : 'tv-stock-none'}">${tvEsc(String(qty) + unitStr)}</span></div>`;
+    if (part.units) {
+      html += `<div class="tv-pop-row"><span class="tv-pop-lbl">Units</span><span>${tvEsc(part.units)}</span></div>`;
+    }
+    const defLoc = part.default_location_detail;
+    if (defLoc) {
+      html += `<div class="tv-pop-row"><span class="tv-pop-lbl">Default location</span><span class="tv-pop-loc-val">${tvEsc(defLoc.name)}</span></div>`;
+    }
+    html += `</div>`;
+
+    html += `<div class="tv-pop-divider"></div>`;
+    if (stockItems === null) {
+      html += `<div class="tv-pop-sec-hdr">Stock locations <span class="tv-pop-loading">(loading\u2026)</span></div>`;
+    } else if (stockItems.length === 0) {
+      html += `<div class="tv-pop-sec-hdr">No stock entries</div>`;
+    } else {
+      html += `<div class="tv-pop-sec-hdr">Stock locations</div><div class="tv-pop-locs">`;
+      stockItems.forEach(item => {
+        const locName = item.location_detail?.name || 'No location';
+        const q = parseFloat(item.quantity) || 0;
+        html += `<div class="tv-pop-loc-row">`;
+        html += `<span class="tv-pop-loc-name">${tvEsc(locName)}</span>`;
+        html += `<span class="${q > 0 ? 'tv-stock-ok' : 'tv-stock-none'}">${tvEsc(String(q) + unitStr)}</span>`;
+        html += `</div>`;
+      });
+      html += `</div>`;
+    }
+
+    this.popover.innerHTML = html;
+    this.popover.querySelectorAll('[data-href]').forEach(el => {
+      el.addEventListener('click', e => { e.preventDefault(); tvNavigateTo(el.dataset.href); });
+    });
+  }
+
+  async loadStockForPopover(part) {
+    const pk = part.pk;
+    if (this.stockCache.has(pk)) {
+      if (this._popCurrentPk === pk && this.popover && !this.popover.hidden) {
+        this.renderPopoverContent(part, this.stockCache.get(pk));
+      }
+      return;
+    }
+    try {
+      const resp = await fetch(
+        `/api/stock/?part=${pk}&location_detail=true&limit=100`,
+        { credentials: 'include' }
+      );
+      if (!resp.ok) throw new Error();
+      const json  = await resp.json();
+      const items = Array.isArray(json) ? json : (json.results ?? []);
+      this.stockCache.set(pk, items);
+      if (this._popCurrentPk === pk && this.popover && !this.popover.hidden) {
+        this.renderPopoverContent(part, items);
+      }
+    } catch (_) {
+      this.stockCache.set(pk, []);
+    }
+  }
+
+  // ── Observers ──────────────────────────────────────────────────────────────
+
+  initObservers() {
+    // Lazy-load images when they scroll into view
+    this.lazyObs = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const img = entry.target;
+        if (img.dataset.src) {
+          img.src    = img.dataset.src;
+          img.onload  = () => { img.style.opacity = '1'; };
+          img.onerror = () => { img.src = '/static/img/blank_image.png'; img.style.opacity = '0.4'; };
+          delete img.dataset.src;
+        }
+        this.lazyObs.unobserve(img);
+      });
+    }, { rootMargin: '400px' });
+
+    // Infinite scroll — load next page when sentinel enters viewport
+    this.scrollObs = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting && !this.state.loading && !this.state.done) {
+        this.loadPage();
+      }
+    }, { rootMargin: '600px' });
+    this.scrollObs.observe(this.sentinel);
+  }
+
+  // ── API ────────────────────────────────────────────────────────────────────
+
+  buildUrl(grouped = false) {
+    const limit = grouped ? 500 : TV_PAGE_SIZE;
+    const p = new URLSearchParams({ limit, offset: this.state.offset });
+    if (this.categoryId) p.set('category', this.categoryId);
+    p.set('cascade', 'true');
+    if (this.state.search) p.set('search', this.state.search);
+    p.set('ordering', this.state.ordering);
+    Object.entries(this.state.filters).forEach(([k, v]) => p.set(k, v ? 'true' : 'false'));
+    return `/api/part/?${p}`;
+  }
+
+  async loadPage() {
+    if (this.state.loading || this.state.done) return;
+    this.state.loading    = true;
+    this.loadingEl.hidden = false;
+
+    const grouped = this.prefs.groupVariants;
+
+    try {
+      const resp = await fetch(this.buildUrl(grouped), { credentials: 'include' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const json = await resp.json();
+
+      const results = Array.isArray(json) ? json : (json.results ?? []);
+      const total   = json.count ?? results.length;
+
+      this.state.total   = total;
+      this.state.offset += results.length;
+      this.parts.push(...results);
+
+      if (grouped) {
+        this.state.done = true;  // one-shot fetch — no infinite scroll in group mode
+        await this.loadParamDataForTemplates(this.prefs.paramTemplates);
+        this.renderGrouped();
+      } else {
+        if (results.length === 0 || this.state.offset >= total) this.state.done = true;
+        await this.loadParamDataForTemplates(this.prefs.paramTemplates);
+        this.appendCards(results);
+      }
+      this.updateStatus();
+    } catch (err) {
+      this.grid.appendChild(this.el('div', 'tv-error', `Failed to load parts: ${err.message}`));
+      this.state.done = true;
+    } finally {
+      this.state.loading    = false;
+      this.loadingEl.hidden = true;
+    }
+  }
+
+  updateStatus() {
+    const shown = Math.min(this.state.offset, this.state.total);
+    this.statusEl.textContent = this.state.total === 0
+      ? 'No parts found'
+      : `Showing ${shown} of ${this.state.total} part${this.state.total !== 1 ? 's' : ''}`;
+  }
+
+  appendCards(results) {
+    const extras = this.tvExtras();
+    const frag   = document.createDocumentFragment();
+    results.forEach(part => {
+      const { card, img } = tvMakeCard(part, this.prefs.fields, extras);
+      this.lazyObs.observe(img);
+      this.attachHoverEvents(card, part);
+      frag.appendChild(card);
+    });
+    this.grid.appendChild(frag);
+  }
+
+  renderGrouped() {
+    this.lazyObs.disconnect();
+    this.grid.innerHTML = '';
+
+    // Sort client-side: stock ordering uses total_in_stock for templates (rollup)
+    const sorted = this.sortForGroup(this.parts);
+
+    // Build template → variants map (only absorb variants whose template is in the result set)
+    const templatePks = new Set(sorted.filter(p => p.is_template).map(p => p.pk));
+    const variantMap  = new Map();
+    const absorbedPks = new Set();
+
+    sorted.forEach(p => {
+      if (p.variant_of != null && templatePks.has(p.variant_of)) {
+        if (!variantMap.has(p.variant_of)) variantMap.set(p.variant_of, []);
+        variantMap.get(p.variant_of).push(p);
+        absorbedPks.add(p.pk);
+      }
+    });
+
+    const frag = document.createDocumentFragment();
+    sorted.forEach(part => {
+      if (absorbedPks.has(part.pk)) return;  // rendered inside its template card
+      const variants = variantMap.get(part.pk) ?? [];
+      const ex = { ...this.tvExtras(), onVariantHover: (el, v) => this.attachHoverEvents(el, v) };
+      const { card, img } = variants.length > 0
+        ? tvMakeGroupedCard(part, variants, this.prefs.fields, ex)
+        : tvMakeCard(part, this.prefs.fields, ex);
+      this.lazyObs.observe(img);
+      this.attachHoverEvents(card, part);
+      frag.appendChild(card);
+    });
+    this.grid.appendChild(frag);
+  }
+
+  // Full reset — re-fetch (search / filter / sort changed)
+  reset() {
+    this.parts         = [];
+    this.state.offset  = 0;
+    this.state.total   = 0;
+    this.state.loading = false;
+    this.state.done    = false;
+    this.lazyObs.disconnect();
+    this.grid.innerHTML      = '';
+    this.statusEl.textContent = '';
+    this.loadPage();
+  }
+
+  // Re-render cards from cached data — no API call (display prefs changed)
+  redrawExisting() {
+    if (this.prefs.groupVariants) {
+      this.renderGrouped();
+      return;
+    }
+    this.lazyObs.disconnect();
+    this.grid.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    this.parts.forEach(part => {
+      const { card, img } = tvMakeCard(part, this.prefs.fields, this.tvExtras());
+      this.lazyObs.observe(img);
+      this.attachHoverEvents(card, part);
+      frag.appendChild(card);
+    });
+    this.grid.appendChild(frag);
+  }
+
+  // ── Styles ─────────────────────────────────────────────────────────────────
+
+  injectStyles() {
+    // Remove stale versions to pick up CSS changes
+    ['tv-plugin-styles', 'tv-plugin-styles-v2'].forEach(old => document.getElementById(old)?.remove());
+    const id = 'tv-plugin-styles-v3';
+    if (document.getElementById(id)) return;
+    const style = document.createElement('style');
+    style.id = id;
+    style.textContent = `
+      /* ── Toolbar ── */
+      .tv-toolbar {
+        display: flex; flex-wrap: wrap; gap: 8px;
+        padding: 10px 12px; align-items: center;
+        border-bottom: 1px solid var(--mantine-color-default-border);
+        background: var(--mantine-color-body);
+        position: sticky; top: 0; z-index: 10;
+      }
+      .tv-search { flex: 1; min-width: 160px; }
+      .tv-input {
+        padding: 6px 10px;
+        border: 1px solid var(--mantine-color-default-border);
+        border-radius: 6px;
+        background: var(--mantine-color-default);
+        color: var(--mantine-color-text);
+        font-size: 0.84rem; font-family: inherit;
+        outline: none; box-sizing: border-box;
+      }
+      .tv-input:focus { border-color: var(--mantine-color-blue-filled); }
+      .tv-select { min-width: 130px; cursor: pointer; }
+      .tv-btn {
+        padding: 6px 14px;
+        border: 1px solid var(--mantine-color-default-border);
+        border-radius: 6px;
+        background: var(--mantine-color-default);
+        color: var(--mantine-color-text);
+        font-size: 0.84rem; font-family: inherit;
+        cursor: pointer; white-space: nowrap;
+      }
+      .tv-btn:hover { background: var(--mantine-color-default-hover); }
+      .tv-size-wrap { display: flex; align-items: center; gap: 6px; }
+      .tv-size-label { font-size: 0.78rem; color: var(--mantine-color-dimmed); white-space: nowrap; }
+      .tv-slider { width: 90px; cursor: pointer; accent-color: var(--mantine-color-blue-filled); }
+
+      /* ── Sub-panels — now floating dropdowns, styled to stand alone ── */
+      .tv-sub-panel {
+        display: flex; flex-wrap: wrap; gap: 6px;
+        padding: 10px 14px; align-items: center;
+        border: 1px solid var(--mantine-color-default-border);
+        border-radius: 8px;
+        background: var(--mantine-color-body);
+        box-shadow: 0 6px 20px rgba(0,0,0,.18);
+      }
+      .tv-sub-label {
+        font-size: 0.76rem; font-weight: 600;
+        color: var(--mantine-color-dimmed);
+        margin-right: 4px; white-space: nowrap;
+      }
+      .tv-pill {
+        padding: 4px 12px;
+        border: 1px solid var(--mantine-color-default-border);
+        border-radius: 100px;
+        background: var(--mantine-color-body);
+        color: var(--mantine-color-dimmed);
+        font-size: 0.78rem; font-family: inherit;
+        cursor: pointer; transition: background 0.12s, color 0.12s;
+      }
+      .tv-pill:hover { background: var(--mantine-color-default-hover); }
+      .tv-pill-yes { background: var(--mantine-color-blue-filled);  color: #fff; border-color: var(--mantine-color-blue-filled); }
+      .tv-pill-no  { background: var(--mantine-color-red-filled);   color: #fff; border-color: var(--mantine-color-red-filled); }
+
+      /* ── Status bar ── */
+      .tv-status { padding: 4px 12px; font-size: 0.76rem; color: var(--mantine-color-dimmed); }
+
+      /* ── Grid ── */
+      .tv-grid { display: grid; gap: 12px; padding: 12px; }
+      .tv-card {
+        border: 1px solid var(--mantine-color-default-border);
+        border-radius: 8px; overflow: hidden;
+        background: var(--mantine-color-body);
+        display: flex; flex-direction: column;
+        transition: box-shadow 0.2s, transform 0.15s;
+      }
+      .tv-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.15); transform: translateY(-2px); }
+
+      /* ── Card image ── */
+      .tv-img-wrap { display: block; position: relative; }
+      .tv-group-overlay {
+        position: absolute; top: 6px; right: 6px;
+        background: var(--mantine-color-blue-filled);
+        color: #fff; border-radius: 4px; padding: 3px 5px;
+        display: flex; align-items: center; justify-content: center;
+        pointer-events: none; line-height: 1;
+      }
+      .tv-img {
+        width: 100%; aspect-ratio: 1;
+        object-fit: contain; padding: 8px; display: block;
+        border-bottom: 1px solid var(--mantine-color-default-border);
+        box-sizing: border-box;
+        background: var(--mantine-color-default-hover);
+        opacity: 0.25; transition: opacity 0.3s;
+      }
+
+      /* ── Card body ── */
+      .tv-body { padding: 8px; display: flex; flex-direction: column; gap: 3px; flex: 1; }
+      .tv-name {
+        font-weight: 600; font-size: 0.83rem;
+        color: var(--mantine-color-text); text-decoration: none;
+        display: block; word-break: break-word; line-height: 1.3;
+      }
+      .tv-name:hover { color: var(--mantine-color-anchor); text-decoration: underline; }
+      .tv-field { font-size: 0.75rem; color: var(--mantine-color-dimmed); }
+      .tv-desc {
+        overflow: hidden; display: -webkit-box;
+        -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      }
+      .tv-label    { font-weight: 600; color: var(--mantine-color-text); }
+      .tv-stock-ok   { color: var(--mantine-color-green-text); }
+      .tv-stock-none { color: var(--mantine-color-red-text); }
+      .tv-badge {
+        display: inline-block; font-size: 0.68rem;
+        padding: 1px 8px; border-radius: 100px; margin-top: 3px;
+      }
+      .tv-badge-active   { background: var(--mantine-color-green-light); color: var(--mantine-color-green-text); }
+      .tv-badge-inactive { background: var(--mantine-color-red-light);   color: var(--mantine-color-red-text); }
+      .tv-badge-tmpl    { background: var(--mantine-color-blue-filled);  color: #fff; }
+      .tv-badge-variant { background: var(--mantine-color-default-hover); color: var(--mantine-color-dimmed); border: 1px solid var(--mantine-color-default-border); }
+
+      /* ── Parameter values ── */
+      .tv-param-sep {
+        border-top: 1px dashed var(--mantine-color-default-border);
+        margin: 5px 0 3px;
+      }
+
+      /* ── Loading / error ── */
+      .tv-sentinel    { height: 40px; }
+      .tv-loading-bar { padding: 20px; text-align: center; color: var(--mantine-color-dimmed); font-size: 0.85rem; }
+      .tv-error       { padding: 12px; color: var(--mantine-color-error); font-size: 0.85rem; }
+
+      /* ── Variant list (group mode) ── */
+      .tv-var-list {
+        border-top: 1px solid var(--mantine-color-default-border);
+        padding: 6px 8px;
+        display: flex; flex-direction: column; gap: 1px;
+      }
+      .tv-var-hdr {
+        font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em;
+        color: var(--mantine-color-dimmed); text-transform: uppercase;
+        padding-bottom: 4px;
+      }
+      .tv-var-row {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 3px 0;
+        border-bottom: 1px solid var(--mantine-color-default-border);
+      }
+      .tv-var-row:last-child { border-bottom: none; }
+      .tv-var-name {
+        font-size: 0.77rem; color: var(--mantine-color-text);
+        text-decoration: none; flex: 1; min-width: 0;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .tv-var-name:hover { color: var(--mantine-color-anchor); text-decoration: underline; }
+      .tv-var-stock {
+        font-size: 0.77rem; font-weight: 600;
+        margin-left: 8px; flex-shrink: 0;
+      }
+      /* Separator between pill groups */
+      .tv-sub-sep {
+        width: 1px; height: 18px; margin: 0 4px;
+        background: var(--mantine-color-default-border);
+        display: inline-block; align-self: center;
+      }
+
+      /* ── Hover popover ── */
+      .tv-popover {
+        background: var(--mantine-color-body);
+        border: 1px solid var(--mantine-color-default-border);
+        border-radius: 10px;
+        box-shadow: 0 8px 32px rgba(0,0,0,.25);
+        font-family: inherit; font-size: 0.82rem;
+        overflow: hidden; max-height: 440px; overflow-y: auto;
+      }
+      .tv-pop-header { padding: 10px 12px 4px; }
+      .tv-pop-name {
+        font-weight: 700; font-size: 0.88rem;
+        color: var(--mantine-color-text); text-decoration: none;
+        display: block; line-height: 1.3; cursor: pointer;
+      }
+      .tv-pop-name:hover { color: var(--mantine-color-anchor); text-decoration: underline; }
+      .tv-pop-ipn  { padding: 0 12px 4px; font-size: 0.74rem; color: var(--mantine-color-dimmed); }
+      .tv-pop-desc { padding: 0 12px 8px; font-size: 0.78rem; color: var(--mantine-color-dimmed);
+                     display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+      .tv-pop-divider { border-top: 1px solid var(--mantine-color-default-border); margin: 2px 0; }
+      .tv-pop-rows { padding: 6px 12px; display: flex; flex-direction: column; gap: 4px; }
+      .tv-pop-row  { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 0.80rem; }
+      .tv-pop-lbl  { color: var(--mantine-color-dimmed); font-size: 0.73rem; flex-shrink: 0; }
+      .tv-pop-loc-val { color: var(--mantine-color-text); text-align: right; font-size: 0.78rem; }
+      .tv-pop-sec-hdr { padding: 6px 12px 3px; font-size: 0.72rem; font-weight: 700;
+                        color: var(--mantine-color-dimmed); text-transform: uppercase; letter-spacing: 0.05em; }
+      .tv-pop-loading { font-weight: 400; opacity: 0.65; }
+      .tv-pop-locs { padding: 2px 12px 10px; display: flex; flex-direction: column; gap: 3px; }
+      .tv-pop-loc-row { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+                        padding: 3px 0; border-bottom: 1px solid var(--mantine-color-default-border);
+                        font-size: 0.78rem; }
+      .tv-pop-loc-row:last-child { border-bottom: none; }
+      .tv-pop-loc-name { color: var(--mantine-color-text); min-width: 0; flex: 1;
+                         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    `;
+    document.head.appendChild(style);
+  }
+}
+
+// ── Panel entry point ─────────────────────────────────────────────────────────
+
+export async function renderPanel(target, data) {
+  if (!target) return;
+  new TileView(target, data?.id).init();
+}
