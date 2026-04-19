@@ -56,28 +56,27 @@ inventree-dymo-plugin==1.1.1
 /home/inventree/data/inventree-part-tiles
 ```
 
-### Step 3 — Restart InvenTree
+### Step 3 — Restart the InvenTree server
 
-InvenTree reads `plugins.txt` on startup and runs `pip install` for each entry. Restarting the stack will install the plugin package into the container.
-
-```bash
-cd /path/to/inventree
-docker compose down && docker compose up -d
-```
-
-### Step 4 — Collect static files
-
-After the containers are running, collect static assets so the panel JavaScript is served correctly:
+InvenTree reads `plugins.txt` on startup and runs `pip install` for each entry. Restarting the server container is sufficient — a full stack restart is not required.
 
 ```bash
-docker exec inventree-server invoke static
+docker restart inventree-server
 ```
 
-### Step 5 — Enable the plugin
+### Step 4 — Enable the plugin
 
 1. Go to **InvenTree → Settings → Plugin Settings**
 2. Find **"Part Tile View"** (key: `tileview`)
 3. Click **Enable**
+
+### Step 5 — Collect static files
+
+InvenTree copies static files only for **active** plugins, so this must run after enabling:
+
+```bash
+docker exec inventree-server invoke static
+```
 
 The **Tile View** panel will now appear on all Part Category pages.
 
@@ -91,14 +90,9 @@ To pull in new changes from GitHub:
 git -C /path/to/inventree/data/inventree-data/inventree-part-tiles pull
 
 docker exec inventree-server pip install --upgrade /home/inventree/data/inventree-part-tiles
+docker restart inventree-server
 docker exec inventree-server invoke static
 docker restart inventree-worker
-```
-
-No full stack restart is needed unless the Python plugin code itself changed (not just the JS/templates). If the plugin stops loading after an update, do a full restart:
-
-```bash
-cd /path/to/inventree && docker compose down && docker compose up -d
 ```
 
 ---
