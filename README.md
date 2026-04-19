@@ -82,6 +82,42 @@ docker restart inventree-worker
 
 ---
 
+## Uninstalling
+
+### Step 1 — Disable the plugin
+
+Go to **InvenTree → Settings → Plugin Settings**, find **"Part Tile View"**, and click **Disable**.
+
+### Step 2 — Remove from `plugins.txt`
+
+Delete the line `/home/inventree/data/inventree-part-tiles` from `inventree-data/plugins.txt`.
+
+### Step 3 — Uninstall the pip package
+
+```bash
+docker exec inventree-server pip uninstall -y inventree-part-tiles
+```
+
+### Step 4 — Restart the server
+
+```bash
+docker restart inventree-server
+```
+
+### Step 5 — Remove collected static files
+
+```bash
+docker exec inventree-server rm -rf /home/inventree/data/static/plugins/tileview
+```
+
+### Step 6 — Delete the cloned repository
+
+```bash
+rm -rf /path/to/inventree/data/inventree-data/inventree-part-tiles
+```
+
+---
+
 ## Features & Usage
 
 Navigate to any **Part Category** in InvenTree. The **Tile View** panel appears alongside the standard panels. All preferences are saved per-browser in `localStorage` and restored automatically on your next visit.
