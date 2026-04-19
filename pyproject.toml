@@ -8,7 +8,7 @@ version = "2.0.0"
 description = "InvenTree plugin: large-tile gallery view for part categories"
 readme = "README.md"
 license = { text = "MIT" }
-authors = [{ name = "Grant Brennae" }]
+authors = [{ name = "Integral Media Inc." }]
 requires-python = ">=3.10"
 keywords = ["inventree", "plugin", "gallery", "tiles"]
 classifiers = [

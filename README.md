@@ -19,34 +19,89 @@ An [InvenTree](https://inventree.org) plugin that adds a large-tile gallery view
 - InvenTree ≥ 0.16.0
 - Python ≥ 3.10
 
-## Installation
+## Installation (Docker — recommended)
 
-### Via pip (recommended)
+This method clones the repo into the InvenTree data directory, which is already bind-mounted inside the container at `/home/inventree/data`. No changes to `docker-compose.yaml` are required.
 
-```bash
-pip install inventree-part-tiles
-```
+### Step 1 — Clone the repo into inventree-data
 
-Then enable the plugin in InvenTree → Settings → Plugin Settings.
-
-### Manual
-
-Clone or download this repo into your InvenTree plugins directory:
+Replace `/path/to/inventree/data/inventree-data` with the host path of your `inventree-data` volume (the directory that contains `plugins.txt`, `media/`, `static/`, etc.).
 
 ```bash
-cd /path/to/inventree/plugins
-git clone https://github.com/integralmedia/inventree-part-tiles.git tile_view_plugin_repo
+git clone https://github.com/integralmedia/inventree-part-tiles.git \
+    /path/to/inventree/data/inventree-data/inventree-part-tiles
 ```
 
-Or copy the `tile_view_plugin/` folder directly into your plugins directory.
-
-After installing, run:
+Example for a default Docker Compose deployment under `/docker/applications/inventree`:
 
 ```bash
-python manage.py collectstatic --no-input
+git clone https://github.com/integralmedia/inventree-part-tiles.git \
+    /docker/applications/inventree/data/inventree-data/inventree-part-tiles
 ```
 
-and restart InvenTree.
+### Step 2 — Add the plugin to `plugins.txt`
+
+Open `inventree-data/plugins.txt` and add the container-side path as the last line:
+
+```
+/home/inventree/data/inventree-part-tiles
+```
+
+The file should look similar to this:
+
+```
+# InvenTree Plugins (uses PIP framework to install)
+
+inventree-dymo-plugin==1.1.1
+/home/inventree/data/inventree-part-tiles
+```
+
+### Step 3 — Restart InvenTree
+
+InvenTree reads `plugins.txt` on startup and runs `pip install` for each entry. Restarting the stack will install the plugin package into the container.
+
+```bash
+cd /path/to/inventree
+docker compose down && docker compose up -d
+```
+
+### Step 4 — Collect static files
+
+After the containers are running, collect static assets so the panel JavaScript is served correctly:
+
+```bash
+docker exec inventree-server invoke static
+```
+
+### Step 5 — Enable the plugin
+
+1. Go to **InvenTree → Settings → Plugin Settings**
+2. Find **"Part Tile View"** (key: `tileview`)
+3. Click **Enable**
+
+The **Tile View** panel will now appear on all Part Category pages.
+
+---
+
+## Updating
+
+To pull in new changes from GitHub:
+
+```bash
+git -C /path/to/inventree/data/inventree-data/inventree-part-tiles pull
+
+docker exec inventree-server pip install --upgrade /home/inventree/data/inventree-part-tiles
+docker exec inventree-server invoke static
+docker restart inventree-worker
+```
+
+No full stack restart is needed unless the Python plugin code itself changed (not just the JS/templates). If the plugin stops loading after an update, do a full restart:
+
+```bash
+cd /path/to/inventree && docker compose down && docker compose up -d
+```
+
+---
 
 ## Usage
 
