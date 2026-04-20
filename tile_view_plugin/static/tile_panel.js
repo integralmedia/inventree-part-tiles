@@ -10,7 +10,7 @@ const TV_DEBOUNCE_MS = 350;
 // ── Preferences (localStorage) ────────────────────────────────────────────────
 
 function tvDefaultPrefs() {
-  return { fields: ['name', 'IPN', 'in_stock'], tileWidth: 180, groupVariants: false, paramTemplates: [] };
+  return { fields: ['name', 'IPN', 'in_stock'], tileWidth: 180, groupVariants: false, groupByCategory: false, paramTemplates: [] };
 }
 
 function tvLoadPrefs() {
@@ -459,6 +459,17 @@ class TileView {
       this.reset();
     });
     this.dispPanel.appendChild(groupPill);
+
+    const groupCatOn   = this.prefs.groupByCategory;
+    const groupCatPill = this.el('button', 'tv-pill' + (groupCatOn ? ' tv-pill-yes' : ''), 'Group by category');
+    groupCatPill.title = 'Group all parts under their category heading';
+    groupCatPill.addEventListener('click', () => {
+      this.prefs.groupByCategory = !this.prefs.groupByCategory;
+      groupCatPill.className = 'tv-pill' + (this.prefs.groupByCategory ? ' tv-pill-yes' : '');
+      tvSavePrefs(this.prefs);
+      this.reset();
+    });
+    this.dispPanel.appendChild(groupCatPill);
     // dispPanel is a floating dropdown — NOT appended to root
     // Parameter pills are appended later by loadParamTemplates() once templates load
   }
@@ -801,7 +812,7 @@ class TileView {
   async loadMultiCategoryPage() {
     this.state.loading    = true;
     this.loadingEl.hidden = false;
-    const grouped = this.prefs.groupVariants;
+    const grouped = this.prefs.groupVariants || this.prefs.groupByCategory;
     try {
       const fetchCat = async (catPk) => {
         const p = new URLSearchParams({ limit: 500, cascade: 'true', category: catPk });
@@ -823,6 +834,7 @@ class TileView {
       this.state.total  = merged.length;
       this.state.offset = merged.length;
       this.state.done   = true;
+      if (this.prefs.groupByCategory && !this.categoriesCache) await this.loadCategories();
       await this.loadParamDataForTemplates(this.prefs.paramTemplates);
       if (grouped) this.renderGrouped(); else this.appendCards(merged);
       this.updateStatus();
@@ -1031,7 +1043,7 @@ class TileView {
     this.state.loading    = true;
     this.loadingEl.hidden = false;
 
-    const grouped = this.prefs.groupVariants;
+    const grouped = this.prefs.groupVariants || this.prefs.groupByCategory;
 
     try {
       const resp = await fetch(this.buildUrl(grouped), { credentials: 'include' });
@@ -1047,6 +1059,7 @@ class TileView {
 
       if (grouped) {
         this.state.done = true;  // one-shot fetch — no infinite scroll in group mode
+        if (this.prefs.groupByCategory && !this.categoriesCache) await this.loadCategories();
         await this.loadParamDataForTemplates(this.prefs.paramTemplates);
         this.renderGrouped();
       } else {
@@ -1090,31 +1103,76 @@ class TileView {
     // Sort client-side: stock ordering uses total_in_stock for templates (rollup)
     const sorted = this.sortForGroup(this.parts);
 
-    // Build template → variants map (only absorb variants whose template is in the result set)
-    const templatePks = new Set(sorted.filter(p => p.is_template).map(p => p.pk));
+    // Build template → variants map (only when groupVariants is on)
     const variantMap  = new Map();
     const absorbedPks = new Set();
 
-    sorted.forEach(p => {
-      if (p.variant_of != null && templatePks.has(p.variant_of)) {
-        if (!variantMap.has(p.variant_of)) variantMap.set(p.variant_of, []);
-        variantMap.get(p.variant_of).push(p);
-        absorbedPks.add(p.pk);
-      }
-    });
+    if (this.prefs.groupVariants) {
+      const templatePks = new Set(sorted.filter(p => p.is_template).map(p => p.pk));
+      sorted.forEach(p => {
+        if (p.variant_of != null && templatePks.has(p.variant_of)) {
+          if (!variantMap.has(p.variant_of)) variantMap.set(p.variant_of, []);
+          variantMap.get(p.variant_of).push(p);
+          absorbedPks.add(p.pk);
+        }
+      });
+    }
 
+    const displayParts = sorted.filter(p => !absorbedPks.has(p.pk));
     const frag = document.createDocumentFragment();
-    sorted.forEach(part => {
-      if (absorbedPks.has(part.pk)) return;  // rendered inside its template card
+    const ex   = { ...this.tvExtras(), onVariantHover: (el, v) => this.attachHoverEvents(el, v) };
+
+    const renderPart = (part) => {
       const variants = variantMap.get(part.pk) ?? [];
-      const ex = { ...this.tvExtras(), onVariantHover: (el, v) => this.attachHoverEvents(el, v) };
       const { card, img } = variants.length > 0
         ? tvMakeGroupedCard(part, variants, this.prefs.fields, ex)
         : tvMakeCard(part, this.prefs.fields, ex);
       this.lazyObs.observe(img);
       this.attachHoverEvents(card, part);
-      frag.appendChild(card);
-    });
+      return card;
+    };
+
+    if (this.prefs.groupByCategory) {
+      // Build a pk→name lookup from the categories cache (part.category is a plain integer pk)
+      const catNameMap = new Map(
+        (this.categoriesCache ?? []).map(c => [c.pk, c.name])
+      );
+      // Collect category groups, preserving internal sort order
+      const catOrder  = [];
+      const catGroups = new Map();
+      displayParts.forEach(part => {
+        const catPk   = part.category ?? part.category_detail?.pk ?? '__none__';
+        const catName = catNameMap.get(catPk) ?? part.category_detail?.name ?? 'Uncategorized';
+        if (!catGroups.has(catPk)) {
+          catOrder.push(catPk);
+          catGroups.set(catPk, { name: catName, parts: [] });
+        }
+        catGroups.get(catPk).parts.push(part);
+      });
+      // Sort category groups alphabetically; uncategorized last
+      catOrder.sort((a, b) => {
+        if (a === '__none__') return 1;
+        if (b === '__none__') return -1;
+        return catGroups.get(a).name.localeCompare(catGroups.get(b).name);
+      });
+      catOrder.forEach(catPk => {
+        const { name, parts } = catGroups.get(catPk);
+        const hdr = document.createElement('div');
+        hdr.className = 'tv-cat-group-hdr';
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = name;
+        const cntSpan = document.createElement('span');
+        cntSpan.className = 'tv-cat-group-count';
+        cntSpan.textContent = `${parts.length} part${parts.length !== 1 ? 's' : ''}`;
+        hdr.appendChild(nameSpan);
+        hdr.appendChild(cntSpan);
+        frag.appendChild(hdr);
+        parts.forEach(part => frag.appendChild(renderPart(part)));
+      });
+    } else {
+      displayParts.forEach(part => frag.appendChild(renderPart(part)));
+    }
+
     this.grid.appendChild(frag);
   }
 
@@ -1133,7 +1191,7 @@ class TileView {
 
   // Re-render cards from cached data — no API call (display prefs changed)
   redrawExisting() {
-    if (this.prefs.groupVariants) {
+    if (this.prefs.groupVariants || this.prefs.groupByCategory) {
       this.renderGrouped();
       return;
     }
@@ -1408,6 +1466,28 @@ class TileView {
         background: var(--mantine-color-blue-filled) !important;
         color: #fff !important;
         border-color: var(--mantine-color-blue-filled) !important;
+      }
+
+      /* ── Category group header (group by category) ── */
+      .tv-cat-group-hdr {
+        grid-column: 1 / -1;
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 10px 12px 9px; margin-top: 18px;
+        font-weight: 800; font-size: 1rem;
+        color: var(--mantine-color-text);
+        background: var(--mantine-color-blue-light, rgba(51,154,240,0.08));
+        border-left: 4px solid var(--mantine-color-blue-filled);
+        border-bottom: 1px solid var(--mantine-color-blue-filled);
+        border-radius: 4px 4px 0 0;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+      }
+      .tv-cat-group-hdr:first-child { margin-top: 0; }
+      .tv-cat-group-count {
+        font-weight: 500; font-size: 0.78rem; text-transform: none; letter-spacing: 0;
+        color: var(--mantine-color-dimmed); white-space: nowrap;
+        background: var(--mantine-color-default-hover);
+        padding: 2px 8px; border-radius: 100px;
       }
     `;
     document.head.appendChild(style);
