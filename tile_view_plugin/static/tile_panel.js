@@ -724,6 +724,15 @@ class TileView {
     );
   }
 
+  _catSelectedDescendantCount(node) {
+    let count = 0;
+    node.children.forEach(c => {
+      if (this.state.categoryFilters.includes(c.pk)) count++;
+      count += this._catSelectedDescendantCount(c);
+    });
+    return count;
+  }
+
   renderCatNode(node, depth) {
     const term       = this.catSearchTerm;
     const selfMatch  = !term || node.name.toLowerCase().includes(term);
@@ -756,6 +765,8 @@ class TileView {
         const nowOpen = childContainer.style.display === 'none';
         childContainer.style.display = nowOpen ? '' : 'none';
         expandBtn.textContent = nowOpen ? '\u25bc' : '\u25b6';
+        // Hide/show the descendant badge based on collapsed state
+        if (descBadge) descBadge.style.display = nowOpen ? 'none' : '';
         if (nowOpen && childContainer.children.length === 0) {
           node.children.forEach(c => {
             const el = this.renderCatNode(c, depth + 1);
@@ -764,6 +775,9 @@ class TileView {
         }
       });
       row.appendChild(expandBtn);
+
+      // Badge ref declared with var so the expand handler closure above can reference it
+      var descBadge = null;
     } else {
       row.appendChild(this.el('span', 'tv-cat-indent'));
     }
@@ -780,6 +794,7 @@ class TileView {
         this.state.categoryFilters = this.state.categoryFilters.filter(pk => pk !== node.pk);
       }
       this.updateCatBtn();
+      this.renderCatTreeInPanel(); // refresh badges on ancestor nodes
       this.reset();
     };
     checkbox.addEventListener('change', onToggle);
@@ -802,6 +817,22 @@ class TileView {
     }
     nameEl.addEventListener('click', () => { checkbox.checked = !checkbox.checked; onToggle(); });
     row.appendChild(nameEl);
+
+    // Badge + row highlight: appended after name so alignment is preserved
+    if (hasChildren) {
+      const descCount = this._catSelectedDescendantCount(node);
+      const isClosed  = childContainer && childContainer.style.display === 'none';
+      if (descCount > 0) {
+        row.classList.add('tv-cat-row-has-sel');
+        descBadge = (() => {
+          const b = this.el('span', 'tv-cat-desc-badge', String(descCount));
+          b.title = `${descCount} selected sub-categor${descCount === 1 ? 'y' : 'ies'} hidden below`;
+          b.style.display = isClosed ? '' : 'none';
+          return b;
+        })();
+        row.appendChild(descBadge);
+      }
+    }
 
     wrapper.appendChild(row);
     if (childContainer) wrapper.appendChild(childContainer);
@@ -1458,6 +1489,20 @@ class TileView {
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
       .tv-cat-name:hover { color: var(--mantine-color-anchor); }
+      .tv-cat-row-has-sel {
+        background: var(--mantine-color-blue-light, rgba(51,154,240,0.08));
+        border-left: 2px solid var(--mantine-color-blue-filled);
+      }
+      .tv-cat-row-has-sel:hover {
+        background: var(--mantine-color-blue-light, rgba(51,154,240,0.14));
+      }
+      .tv-cat-desc-badge {
+        flex-shrink: 0; margin-left: 6px;
+        background: var(--mantine-color-blue-filled);
+        color: #fff; font-size: 0.68rem; font-weight: 700;
+        padding: 1px 6px; border-radius: 100px; line-height: 1.6;
+        pointer-events: none;
+      }
       .tv-cat-highlight {
         background: var(--mantine-color-yellow-light, rgba(255,220,0,0.3));
         color: inherit; border-radius: 2px; padding: 0 1px;
