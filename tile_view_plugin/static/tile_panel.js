@@ -247,18 +247,25 @@ class TileView {
     this.state      = {
       search: '', ordering: 'name', filters: {},
       offset: 0, total: 0, loading: false, done: false,
+      categoryFilters: [],
     };
     this.parts              = [];          // cached for instant display-prefs redraws
     this.paramData          = new Map();   // templatePk -> Map<modelId, data>
     this.paramTemplatesMeta = new Map();  // templatePk -> template object
     this.stockCache         = new Map();  // partPk -> stock items array
+    this.categoriesCache    = null;       // flat list of all categories
+    this.categoryTreeRoots  = null;       // built tree structure
+    this.catSearchTerm      = '';
+    this.catPanel           = null;
+    this.catBtn             = null;
+    this.catTreeEl          = null;
     this.lazyObs   = null;
     this.scrollObs = null;
   }
 
   init() {
     // Clean up floating panels / popover from any previous render
-    [this.filterPanel, this.dispPanel, this.popover].forEach(el => {
+    [this.filterPanel, this.dispPanel, this.popover, this.catPanel].forEach(el => {
       if (el && el.parentElement === document.body) document.body.removeChild(el);
     });
     // Clear any previous render (React may call renderPanel more than once on the same target)
@@ -336,6 +343,11 @@ class TileView {
     const filterBtn = this.el('button', 'tv-btn', 'Filters');
     filterBtn.addEventListener('click', () => this.toggleDropdown(this.filterPanel, filterBtn));
     bar.appendChild(filterBtn);
+
+    // Category filter
+    this.catBtn = this.el('button', 'tv-btn', 'Categories');
+    this.catBtn.addEventListener('click', () => this.openCategoryPopover(this.catBtn));
+    bar.appendChild(this.catBtn);
 
     // Display options toggle
     const dispBtn = this.el('button', 'tv-btn', 'Display');
@@ -530,14 +542,14 @@ class TileView {
   // ── Dropdown panel management ──────────────────────────────────────────────
 
   _cleanupPrev() {
-    [this.filterPanel, this.dispPanel, this.popover].forEach(el => {
+    [this.filterPanel, this.dispPanel, this.popover, this.catPanel].forEach(el => {
       if (el && el.parentElement === document.body) document.body.removeChild(el);
     });
   }
 
   toggleDropdown(panel, btn) {
     const isOpen = panel.parentElement === document.body && !panel.hidden;
-    [this.filterPanel, this.dispPanel].forEach(p => {
+    [this.filterPanel, this.dispPanel, this.catPanel].forEach(p => {
       if (p !== panel && p && p.parentElement === document.body) document.body.removeChild(p);
     });
     if (isOpen) { if (panel.parentElement === document.body) document.body.removeChild(panel); return; }
@@ -558,6 +570,269 @@ class TileView {
       }
     };
     setTimeout(() => document.addEventListener('pointerdown', close, true), 10);
+  }
+
+  // ── Category filter popover ────────────────────────────────────────────────
+
+  updateCatBtn() {
+    if (!this.catBtn) return;
+    const count = this.state.categoryFilters.length;
+    this.catBtn.textContent = count > 0 ? `Categories (${count})` : 'Categories';
+    this.catBtn.classList.toggle('tv-btn-active', count > 0);
+  }
+
+  async openCategoryPopover(btn) {
+    // Toggle: close if already open
+    if (this.catPanel && this.catPanel.parentElement === document.body) {
+      document.body.removeChild(this.catPanel);
+      return;
+    }
+    // Close other floating panels
+    [this.filterPanel, this.dispPanel].forEach(p => {
+      if (p && p.parentElement === document.body) document.body.removeChild(p);
+    });
+
+    this.catPanel = this.buildCatPanel();
+    const rect   = btn.getBoundingClientRect();
+    const panelW = 300;
+    let   left   = rect.left;
+    if (left + panelW > window.innerWidth - 8) left = Math.max(8, window.innerWidth - panelW - 8);
+    const maxH = Math.max(180, Math.min(440, window.innerHeight - rect.bottom - 20));
+    this.catPanel.style.cssText =
+      `position:fixed;top:${rect.bottom + 4}px;left:${left}px;` +
+      `z-index:99999;width:${panelW}px;max-height:${maxH}px;`;
+    document.body.appendChild(this.catPanel);
+    this.catPanel.querySelector('.tv-cat-search')?.focus();
+
+    const close = (e) => {
+      if (this.catPanel && !this.catPanel.contains(e.target) && e.target !== btn) {
+        if (this.catPanel.parentElement === document.body) document.body.removeChild(this.catPanel);
+        document.removeEventListener('pointerdown', close, true);
+      }
+    };
+    setTimeout(() => document.addEventListener('pointerdown', close, true), 10);
+
+    if (!this.categoriesCache) {
+      if (this.catTreeEl) this.catTreeEl.innerHTML = '<div class="tv-cat-loading">Loading\u2026</div>';
+      await this.loadCategories();
+      this.renderCatTreeInPanel();
+    }
+  }
+
+  async loadCategories() {
+    try {
+      const resp = await fetch('/api/part/category/?limit=2000', { credentials: 'include' });
+      if (!resp.ok) return;
+      const json = await resp.json();
+      const cats = Array.isArray(json) ? json : (json.results ?? []);
+      this.categoriesCache   = cats;
+      this.categoryTreeRoots = this.buildCategoryTree(cats);
+    } catch (_) {
+      this.categoriesCache   = [];
+      this.categoryTreeRoots = [];
+    }
+  }
+
+  buildCategoryTree(categories) {
+    const map   = new Map(categories.map(c => [c.pk, { ...c, children: [] }]));
+    const roots = [];
+    map.forEach(cat => {
+      if (cat.parent == null) {
+        roots.push(cat);
+      } else {
+        const parent = map.get(cat.parent);
+        if (parent) parent.children.push(cat);
+        else roots.push(cat); // orphaned → treat as root
+      }
+    });
+    const sort = nodes => {
+      nodes.sort((a, b) => a.name.localeCompare(b.name));
+      nodes.forEach(n => sort(n.children));
+    };
+    sort(roots);
+    return roots;
+  }
+
+  buildCatPanel() {
+    const panel  = this.el('div', 'tv-cat-panel');
+    const header = this.el('div', 'tv-cat-header');
+
+    const search = document.createElement('input');
+    search.type        = 'search';
+    search.placeholder = 'Search categories\u2026';
+    search.className   = 'tv-cat-search tv-input';
+    header.appendChild(search);
+
+    const clearBtn = this.el('button', 'tv-btn tv-cat-clear-btn', 'Clear');
+    clearBtn.title = 'Clear selected categories';
+    clearBtn.addEventListener('click', () => {
+      this.state.categoryFilters = [];
+      this.updateCatBtn();
+      this.renderCatTreeInPanel();
+      this.reset();
+    });
+    header.appendChild(clearBtn);
+    panel.appendChild(header);
+
+    const treeEl = this.el('div', 'tv-cat-tree');
+    this.catTreeEl = treeEl;
+    panel.appendChild(treeEl);
+
+    if (this.categoriesCache) this.renderCatTreeInPanel();
+
+    search.addEventListener('input', tvDebounce(e => {
+      this.catSearchTerm = e.target.value.trim().toLowerCase();
+      this.renderCatTreeInPanel();
+    }, 200));
+
+    return panel;
+  }
+
+  renderCatTreeInPanel() {
+    if (!this.catTreeEl) return;
+    if (!this.categoryTreeRoots || this.categoryTreeRoots.length === 0) {
+      this.catTreeEl.innerHTML = '<div class="tv-cat-loading">No categories found.</div>';
+      return;
+    }
+    this.catTreeEl.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    this.categoryTreeRoots.forEach(node => {
+      const el = this.renderCatNode(node, 0);
+      if (el) frag.appendChild(el);
+    });
+    this.catTreeEl.appendChild(frag);
+    if (this.catTreeEl.children.length === 0) {
+      this.catTreeEl.innerHTML = '<div class="tv-cat-loading">No matching categories.</div>';
+    }
+  }
+
+  _catHasMatch(node, term) {
+    if (!term) return false;
+    return node.children.some(c =>
+      c.name.toLowerCase().includes(term) || this._catHasMatch(c, term)
+    );
+  }
+
+  renderCatNode(node, depth) {
+    const term       = this.catSearchTerm;
+    const selfMatch  = !term || node.name.toLowerCase().includes(term);
+    const childMatch = this._catHasMatch(node, term);
+    if (!selfMatch && !childMatch) return null;
+
+    const hasChildren = node.children.length > 0;
+    const wrapper     = document.createElement('div');
+    const row         = this.el('div', 'tv-cat-row');
+    row.style.paddingLeft = `${8 + depth * 16}px`;
+
+    // Expand / collapse button (or spacer for leaves)
+    let childContainer = null;
+    if (hasChildren) {
+      childContainer = document.createElement('div');
+      childContainer.className = 'tv-cat-children';
+      const autoExpand = !!term && childMatch;
+      childContainer.style.display = autoExpand ? '' : 'none';
+      if (autoExpand) {
+        node.children.forEach(c => {
+          const el = this.renderCatNode(c, depth + 1);
+          if (el) childContainer.appendChild(el);
+        });
+      }
+      const expandBtn = this.el('button', 'tv-cat-expand-btn');
+      expandBtn.textContent = autoExpand ? '\u25bc' : '\u25b6';
+      expandBtn.title = 'Expand / collapse';
+      expandBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        const nowOpen = childContainer.style.display === 'none';
+        childContainer.style.display = nowOpen ? '' : 'none';
+        expandBtn.textContent = nowOpen ? '\u25bc' : '\u25b6';
+        if (nowOpen && childContainer.children.length === 0) {
+          node.children.forEach(c => {
+            const el = this.renderCatNode(c, depth + 1);
+            if (el) childContainer.appendChild(el);
+          });
+        }
+      });
+      row.appendChild(expandBtn);
+    } else {
+      row.appendChild(this.el('span', 'tv-cat-indent'));
+    }
+
+    // Checkbox
+    const checkbox = document.createElement('input');
+    checkbox.type      = 'checkbox';
+    checkbox.className = 'tv-cat-check';
+    checkbox.checked   = this.state.categoryFilters.includes(node.pk);
+    const onToggle = () => {
+      if (checkbox.checked) {
+        if (!this.state.categoryFilters.includes(node.pk)) this.state.categoryFilters.push(node.pk);
+      } else {
+        this.state.categoryFilters = this.state.categoryFilters.filter(pk => pk !== node.pk);
+      }
+      this.updateCatBtn();
+      this.reset();
+    };
+    checkbox.addEventListener('change', onToggle);
+    row.appendChild(checkbox);
+
+    // Name label (clicking also toggles checkbox)
+    const nameEl = this.el('span', 'tv-cat-name');
+    if (selfMatch && term) {
+      const idx = node.name.toLowerCase().indexOf(term);
+      if (idx >= 0) {
+        nameEl.innerHTML =
+          tvEsc(node.name.slice(0, idx)) +
+          `<mark class="tv-cat-highlight">${tvEsc(node.name.slice(idx, idx + term.length))}</mark>` +
+          tvEsc(node.name.slice(idx + term.length));
+      } else {
+        nameEl.textContent = node.name;
+      }
+    } else {
+      nameEl.textContent = node.name;
+    }
+    nameEl.addEventListener('click', () => { checkbox.checked = !checkbox.checked; onToggle(); });
+    row.appendChild(nameEl);
+
+    wrapper.appendChild(row);
+    if (childContainer) wrapper.appendChild(childContainer);
+    return wrapper;
+  }
+
+  // Parallel fetch for each selected category; results are merged & deduplicated
+  async loadMultiCategoryPage() {
+    this.state.loading    = true;
+    this.loadingEl.hidden = false;
+    const grouped = this.prefs.groupVariants;
+    try {
+      const fetchCat = async (catPk) => {
+        const p = new URLSearchParams({ limit: 500, cascade: 'true', category: catPk });
+        if (this.state.search) p.set('search', this.state.search);
+        p.set('ordering', this.state.ordering);
+        Object.entries(this.state.filters).forEach(([k, v]) => p.set(k, v ? 'true' : 'false'));
+        const resp = await fetch(`/api/part/?${p}`, { credentials: 'include' });
+        if (!resp.ok) return [];
+        const json = await resp.json();
+        return Array.isArray(json) ? json : (json.results ?? []);
+      };
+      const batches = await Promise.all(this.state.categoryFilters.map(fetchCat));
+      const seen    = new Set();
+      const merged  = [];
+      batches.flat().forEach(part => {
+        if (!seen.has(part.pk)) { seen.add(part.pk); merged.push(part); }
+      });
+      this.parts        = merged;
+      this.state.total  = merged.length;
+      this.state.offset = merged.length;
+      this.state.done   = true;
+      await this.loadParamDataForTemplates(this.prefs.paramTemplates);
+      if (grouped) this.renderGrouped(); else this.appendCards(merged);
+      this.updateStatus();
+    } catch (err) {
+      this.grid.appendChild(this.el('div', 'tv-error', `Failed to load parts: ${err.message}`));
+      this.state.done = true;
+    } finally {
+      this.state.loading    = false;
+      this.loadingEl.hidden = true;
+    }
   }
 
   // ── Group-mode client-side sort ────────────────────────────────────────────
@@ -735,7 +1010,13 @@ class TileView {
   buildUrl(grouped = false) {
     const limit = grouped ? 500 : TV_PAGE_SIZE;
     const p = new URLSearchParams({ limit, offset: this.state.offset });
-    if (this.categoryId) p.set('category', this.categoryId);
+    // Category: use categoryFilters if set, otherwise fall back to context categoryId
+    if (this.state.categoryFilters.length === 1) {
+      p.set('category', this.state.categoryFilters[0]);
+    } else if (this.state.categoryFilters.length === 0 && this.categoryId) {
+      p.set('category', this.categoryId);
+    }
+    // length > 1 is handled by loadMultiCategoryPage()
     p.set('cascade', 'true');
     if (this.state.search) p.set('search', this.state.search);
     p.set('ordering', this.state.ordering);
@@ -745,6 +1026,8 @@ class TileView {
 
   async loadPage() {
     if (this.state.loading || this.state.done) return;
+    // Delegate multi-category fetches to a dedicated loader
+    if (this.state.categoryFilters.length > 1) { await this.loadMultiCategoryPage(); return; }
     this.state.loading    = true;
     this.loadingEl.hidden = false;
 
@@ -1073,6 +1356,59 @@ class TileView {
       .tv-pop-loc-row:last-child { border-bottom: none; }
       .tv-pop-loc-name { color: var(--mantine-color-text); min-width: 0; flex: 1;
                          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+      /* ── Category filter popover ── */
+      .tv-cat-panel {
+        background: var(--mantine-color-body);
+        border: 1px solid var(--mantine-color-default-border);
+        border-radius: 8px;
+        box-shadow: 0 6px 20px rgba(0,0,0,.18);
+        display: flex; flex-direction: column;
+        overflow: hidden; font-family: inherit; font-size: 0.83rem;
+      }
+      .tv-cat-header {
+        display: flex; gap: 6px; align-items: center;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--mantine-color-default-border);
+        flex-shrink: 0;
+      }
+      .tv-cat-search { flex: 1; min-width: 0; }
+      .tv-cat-clear-btn { flex-shrink: 0; padding: 4px 10px !important; font-size: 0.78rem !important; }
+      .tv-cat-tree { overflow-y: auto; flex: 1; padding: 4px 0; min-height: 60px; }
+      .tv-cat-loading {
+        padding: 12px; font-size: 0.82rem;
+        color: var(--mantine-color-dimmed); text-align: center;
+      }
+      .tv-cat-row {
+        display: flex; align-items: center; gap: 5px;
+        padding: 3px 8px; border-radius: 4px; cursor: default; min-height: 26px;
+      }
+      .tv-cat-row:hover { background: var(--mantine-color-default-hover); }
+      .tv-cat-expand-btn {
+        flex-shrink: 0; width: 18px; height: 18px; padding: 0;
+        border: none; background: transparent; cursor: pointer;
+        color: var(--mantine-color-dimmed); font-size: 0.6rem;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 3px;
+      }
+      .tv-cat-expand-btn:hover { background: var(--mantine-color-default-hover); color: var(--mantine-color-text); }
+      .tv-cat-indent { display: inline-block; width: 18px; flex-shrink: 0; }
+      .tv-cat-check { flex-shrink: 0; cursor: pointer; accent-color: var(--mantine-color-blue-filled); }
+      .tv-cat-name {
+        font-size: 0.82rem; color: var(--mantine-color-text);
+        cursor: pointer; flex: 1; min-width: 0;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .tv-cat-name:hover { color: var(--mantine-color-anchor); }
+      .tv-cat-highlight {
+        background: var(--mantine-color-yellow-light, rgba(255,220,0,0.3));
+        color: inherit; border-radius: 2px; padding: 0 1px;
+      }
+      .tv-btn-active {
+        background: var(--mantine-color-blue-filled) !important;
+        color: #fff !important;
+        border-color: var(--mantine-color-blue-filled) !important;
+      }
     `;
     document.head.appendChild(style);
   }
