@@ -374,104 +374,143 @@ class TileView {
     this.root.appendChild(bar);
   }
 
+  // ── Panel helpers ─────────────────────────────────────────────────────────
+
+  tvOptRow(label, checked, onChange, description) {
+    const row = this.el('div', 'tv-opt-row');
+    const cb  = document.createElement('input');
+    cb.type      = 'checkbox';
+    cb.className = 'tv-opt-check';
+    cb.checked   = checked;
+    cb.addEventListener('change', () => onChange(cb.checked, cb));
+    const lbl = this.el('label', 'tv-opt-label');
+    lbl.textContent = label;
+    lbl.addEventListener('click', () => { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); });
+    row.appendChild(cb);
+    row.appendChild(lbl);
+    if (description) {
+      const desc = this.el('span', 'tv-opt-desc', description);
+      row.appendChild(desc);
+    }
+    return { row, cb };
+  }
+
+  tvOptSection(parent, title) {
+    const hdr = this.el('div', 'tv-opt-section-hdr', title);
+    parent.appendChild(hdr);
+  }
+
   // ── Filter panel ───────────────────────────────────────────────────────────
-  // Pills cycle: off → yes (blue) → no (red) → off
-  // off = no filter; yes = ?key=true; no = ?key=false
 
   buildFilterPanel() {
-    this.filterPanel = this.el('div', 'tv-sub-panel');
+    this.filterPanel = this.el('div', 'tv-sub-panel tv-sub-panel-v');
     this.filterPanel.hidden = true;
-    this.filterPanel.appendChild(this.el('span', 'tv-sub-label', 'Filters:'));
 
-    [
-      ['active',       'Active'],
-      ['assembly',     'Assembly'],
-      ['component',    'Component'],
-      ['purchaseable', 'Purchaseable'],
-      ['salable',      'Salable'],
-      ['trackable',    'Trackable'],
-      ['virtual',      'Virtual'],
-      ['has_stock',    'Has Stock'],
-      ['is_template',  'Templates only'],
-    ].forEach(([key, label]) => {
-      const pill = this.el('button', 'tv-pill', label);
-      pill.dataset.state = 'off';
-      pill.addEventListener('click', () => {
-        const cur  = pill.dataset.state;
-        const next = cur === 'off' ? 'yes' : cur === 'yes' ? 'no' : 'off';
-        pill.dataset.state = next;
-        pill.className = 'tv-pill' +
-          (next === 'yes' ? ' tv-pill-yes' : next === 'no' ? ' tv-pill-no' : '');
-        if (next === 'off') delete this.state.filters[key];
-        else this.state.filters[key] = (next === 'yes');
-        this.reset();
+    const filterDefs = [
+      { section: 'Part type' },
+      { key: 'active',      label: 'Active' },
+      { key: 'is_template', label: 'Template' },
+      { key: 'virtual',     label: 'Virtual' },
+      { section: 'BOM role' },
+      { key: 'assembly',    label: 'Assembly' },
+      { key: 'component',   label: 'Component' },
+      { section: 'Commerce' },
+      { key: 'purchaseable', label: 'Purchaseable' },
+      { key: 'salable',     label: 'Salable' },
+      { key: 'trackable',   label: 'Trackable' },
+      { section: 'Inventory' },
+      { key: 'has_stock',   label: 'Has stock' },
+    ];
+
+    filterDefs.forEach(def => {
+      if (def.section) { this.tvOptSection(this.filterPanel, def.section); return; }
+      const { key, label } = def;
+      const row  = this.el('div', 'tv-opt-row tv-filter-row');
+      const lbl  = this.el('span', 'tv-opt-label', label);
+      const sel  = document.createElement('select');
+      sel.className = 'tv-opt-select';
+      const opts = [['', 'Any'], ['true', 'Yes'], ['false', 'No']];
+      opts.forEach(([val, txt]) => {
+        const opt = document.createElement('option');
+        opt.value = val; opt.textContent = txt;
+        if (val === '' && !(key in this.state.filters)) opt.selected = true;
+        if (val === 'true'  && this.state.filters[key] === true)  opt.selected = true;
+        if (val === 'false' && this.state.filters[key] === false) opt.selected = true;
+        sel.appendChild(opt);
       });
-      this.filterPanel.appendChild(pill);
+      const applySelect = () => {
+        if (sel.value === '') delete this.state.filters[key];
+        else this.state.filters[key] = (sel.value === 'true');
+        this.reset();
+      };
+      sel.addEventListener('change', applySelect);
+      // Clicking the row (but not directly on the <select>) cycles through options
+      row.addEventListener('click', e => {
+        if (e.target === sel) return;
+        sel.selectedIndex = (sel.selectedIndex + 1) % sel.options.length;
+        applySelect();
+      });
+      row.appendChild(lbl);
+      row.appendChild(sel);
+      this.filterPanel.appendChild(row);
     });
-
     // filterPanel is a floating dropdown — NOT appended to root
   }
 
   // ── Display options panel ──────────────────────────────────────────────────
 
   buildDispPanel() {
-    this.dispPanel = this.el('div', 'tv-sub-panel');
+    this.dispPanel = this.el('div', 'tv-sub-panel tv-sub-panel-v');
     this.dispPanel.hidden = true;
-    this.dispPanel.appendChild(this.el('span', 'tv-sub-label', 'Show on tiles:'));
 
+    // ── Show on tiles ──
+    this.tvOptSection(this.dispPanel, 'Show on tiles');
     [
       ['name',        'Name'],
       ['IPN',         'IPN'],
       ['description', 'Description'],
-      ['in_stock',    'Stock'],
+      ['in_stock',    'Stock quantity'],
       ['category',    'Category'],
       ['revision',    'Revision'],
       ['active',      'Active badge'],
     ].forEach(([key, label]) => {
-      const on   = this.prefs.fields.includes(key);
-      const pill = this.el('button', 'tv-pill' + (on ? ' tv-pill-yes' : ''), label);
-      pill.addEventListener('click', () => {
+      const { row, cb } = this.tvOptRow(label, this.prefs.fields.includes(key), (checked) => {
         const idx = this.prefs.fields.indexOf(key);
-        if (idx >= 0) {
-          this.prefs.fields.splice(idx, 1);
-          pill.className = 'tv-pill';
-        } else {
-          this.prefs.fields.push(key);
-          pill.className = 'tv-pill tv-pill-yes';
-        }
+        if (checked && idx < 0) this.prefs.fields.push(key);
+        if (!checked && idx >= 0) this.prefs.fields.splice(idx, 1);
         tvSavePrefs(this.prefs);
-        this.redrawExisting();   // instant — no API call
+        this.redrawExisting();
       });
-      this.dispPanel.appendChild(pill);
+      this.dispPanel.appendChild(row);
     });
 
-    // ── Group variants toggle (persisted) ──
-    const groupSep = this.el('span', 'tv-sub-sep');
-    this.dispPanel.appendChild(groupSep);
+    // ── Layout ──
+    this.tvOptSection(this.dispPanel, 'Layout');
+    const { row: gvRow } = this.tvOptRow(
+      'Group variants', this.prefs.groupVariants,
+      (checked) => {
+        this.prefs.groupVariants = checked;
+        tvSavePrefs(this.prefs);
+        this.reset();
+      },
+      'Collapse variants under template tile'
+    );
+    this.dispPanel.appendChild(gvRow);
 
-    const groupOn = this.prefs.groupVariants;
-    const groupPill = this.el('button', 'tv-pill' + (groupOn ? ' tv-pill-yes' : ''), 'Group variants');
-    groupPill.title = 'Show one tile per template with its variants listed inside';
-    groupPill.addEventListener('click', () => {
-      this.prefs.groupVariants = !this.prefs.groupVariants;
-      groupPill.className = 'tv-pill' + (this.prefs.groupVariants ? ' tv-pill-yes' : '');
-      tvSavePrefs(this.prefs);
-      this.reset();
-    });
-    this.dispPanel.appendChild(groupPill);
+    const { row: gcRow } = this.tvOptRow(
+      'Group by category', this.prefs.groupByCategory,
+      (checked) => {
+        this.prefs.groupByCategory = checked;
+        tvSavePrefs(this.prefs);
+        this.reset();
+      },
+      'Show a heading for each category'
+    );
+    this.dispPanel.appendChild(gcRow);
 
-    const groupCatOn   = this.prefs.groupByCategory;
-    const groupCatPill = this.el('button', 'tv-pill' + (groupCatOn ? ' tv-pill-yes' : ''), 'Group by category');
-    groupCatPill.title = 'Group all parts under their category heading';
-    groupCatPill.addEventListener('click', () => {
-      this.prefs.groupByCategory = !this.prefs.groupByCategory;
-      groupCatPill.className = 'tv-pill' + (this.prefs.groupByCategory ? ' tv-pill-yes' : '');
-      tvSavePrefs(this.prefs);
-      this.reset();
-    });
-    this.dispPanel.appendChild(groupCatPill);
+    // ── Parameters ── (populated later by loadParamTemplates)
+    this.dispParamSection = null; // sentinel; built by buildParamPills
     // dispPanel is a floating dropdown — NOT appended to root
-    // Parameter pills are appended later by loadParamTemplates() once templates load
   }
 
   // ── Parameter template loading ─────────────────────────────────────────────
@@ -497,29 +536,23 @@ class TileView {
 
   buildParamPills(templates) {
     if (templates.length === 0) return;
-    const sep = this.el('span', 'tv-sub-sep');
-    this.dispPanel.appendChild(sep);
-    this.dispPanel.appendChild(this.el('span', 'tv-sub-label', 'Parameters:'));
+    this.tvOptSection(this.dispPanel, 'Parameters');
     templates.forEach(tmpl => {
-      const on    = this.prefs.paramTemplates.includes(tmpl.pk);
       const label = tmpl.units ? `${tmpl.name} (${tmpl.units})` : tmpl.name;
-      const pill  = this.el('button', 'tv-pill' + (on ? ' tv-pill-yes' : ''), label);
-      pill.addEventListener('click', async () => {
+      const { row, cb } = this.tvOptRow(label, this.prefs.paramTemplates.includes(tmpl.pk), async (checked, checkboxEl) => {
         const idx = this.prefs.paramTemplates.indexOf(tmpl.pk);
-        if (idx >= 0) {
-          this.prefs.paramTemplates.splice(idx, 1);
-          pill.className = 'tv-pill';
-        } else {
-          this.prefs.paramTemplates.push(tmpl.pk);
-          pill.className = 'tv-pill tv-pill-yes';
-          pill.disabled = true;
+        if (checked) {
+          if (idx < 0) this.prefs.paramTemplates.push(tmpl.pk);
+          checkboxEl.disabled = true;
           await this.loadParamDataForTemplates([tmpl.pk]);
-          pill.disabled = false;
+          checkboxEl.disabled = false;
+        } else {
+          if (idx >= 0) this.prefs.paramTemplates.splice(idx, 1);
         }
         tvSavePrefs(this.prefs);
         this.redrawExisting();
       });
-      this.dispPanel.appendChild(pill);
+      this.dispPanel.appendChild(row);
     });
   }
 
@@ -564,13 +597,27 @@ class TileView {
       if (p !== panel && p && p.parentElement === document.body) document.body.removeChild(p);
     });
     if (isOpen) { if (panel.parentElement === document.body) document.body.removeChild(panel); return; }
-    const rect = btn.getBoundingClientRect();
-    const maxW = Math.min(680, window.innerWidth - 16);
-    let   left = rect.left;
-    if (left + maxW > window.innerWidth - 8) left = Math.max(8, window.innerWidth - maxW - 8);
+
+    const rect    = btn.getBoundingClientRect();
+    const margin  = 8;
+    const panelW  = 280;
+    // Horizontal: clamp so panel never overflows right edge
+    let left = rect.left;
+    if (left + panelW > window.innerWidth - margin) left = Math.max(margin, window.innerWidth - panelW - margin);
+    // Vertical: prefer below button; flip above if not enough room below
+    const spaceBelow = window.innerHeight - rect.bottom - margin;
+    const spaceAbove = rect.top - margin;
+    const maxH       = Math.min(480, Math.max(spaceBelow, spaceAbove) - 4);
+    let   top;
+    if (spaceBelow >= Math.min(200, maxH) || spaceBelow >= spaceAbove) {
+      top = rect.bottom + 4;
+    } else {
+      // Place above — we'll set bottom instead, achieved by computing top from maxH
+      top = rect.top - 4 - Math.min(maxH, spaceAbove);
+    }
     panel.style.cssText =
-      `position:fixed;top:${rect.bottom + 4}px;left:${left}px;` +
-      `z-index:99999;max-width:${maxW}px;min-width:220px;`;
+      `position:fixed;top:${top}px;left:${left}px;` +
+      `z-index:99999;width:${panelW}px;max-height:${maxH}px;overflow-y:auto;`;
     panel.hidden = false;
     document.body.appendChild(panel);
     const close = (e) => {
@@ -1254,7 +1301,8 @@ class TileView {
         padding: 10px 12px; align-items: center;
         border-bottom: 1px solid var(--mantine-color-default-border);
         background: var(--mantine-color-body);
-        position: sticky; top: 0; z-index: 10;
+        box-shadow: 0 2px 8px rgba(0,0,0,.08);
+        z-index: 10;
       }
       .tv-search { flex: 1; min-width: 160px; }
       .tv-input {
@@ -1282,32 +1330,55 @@ class TileView {
       .tv-size-label { font-size: 0.78rem; color: var(--mantine-color-dimmed); white-space: nowrap; }
       .tv-slider { width: 90px; cursor: pointer; accent-color: var(--mantine-color-blue-filled); }
 
-      /* ── Sub-panels — now floating dropdowns, styled to stand alone ── */
+      /* ── Sub-panels — floating dropdowns ── */
       .tv-sub-panel {
-        display: flex; flex-wrap: wrap; gap: 6px;
-        padding: 10px 14px; align-items: center;
         border: 1px solid var(--mantine-color-default-border);
         border-radius: 8px;
         background: var(--mantine-color-body);
         box-shadow: 0 6px 20px rgba(0,0,0,.18);
+        overflow: hidden; /* clipped by border-radius; scrolling set inline */
       }
-      .tv-sub-label {
-        font-size: 0.76rem; font-weight: 600;
-        color: var(--mantine-color-dimmed);
-        margin-right: 4px; white-space: nowrap;
+      .tv-sub-panel-v {
+        display: flex; flex-direction: column;
+        min-width: 220px; max-width: 300px;
+        /* overflow-y applied inline by toggleDropdown so section headers stay sticky */
       }
-      .tv-pill {
-        padding: 4px 12px;
+      .tv-opt-section-hdr {
+        padding: 7px 14px 5px;
+        font-size: 0.70rem; font-weight: 700; letter-spacing: 0.06em;
+        text-transform: uppercase; color: var(--mantine-color-dimmed);
+        background: var(--mantine-color-default-hover);
+        border-bottom: 1px solid var(--mantine-color-default-border);
+      }
+      .tv-opt-row {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 14px;
+        border-bottom: 1px solid var(--mantine-color-default-border);
+      }
+      .tv-opt-row:last-child { border-bottom: none; }
+      .tv-opt-row:hover { background: var(--mantine-color-default-hover); }
+      .tv-opt-check {
+        flex-shrink: 0; cursor: pointer; width: 15px; height: 15px;
+        accent-color: var(--mantine-color-blue-filled);
+      }
+      .tv-opt-label {
+        font-size: 0.83rem; color: var(--mantine-color-text);
+        cursor: pointer; flex: 1;
+      }
+      .tv-opt-desc {
+        font-size: 0.72rem; color: var(--mantine-color-dimmed);
+        display: block; margin-top: 1px;
+      }
+      .tv-filter-row { justify-content: space-between; }
+      .tv-filter-row .tv-opt-label { flex: 1; }
+      .tv-opt-select {
+        flex-shrink: 0; padding: 3px 6px;
         border: 1px solid var(--mantine-color-default-border);
-        border-radius: 100px;
-        background: var(--mantine-color-body);
-        color: var(--mantine-color-dimmed);
-        font-size: 0.78rem; font-family: inherit;
-        cursor: pointer; transition: background 0.12s, color 0.12s;
+        border-radius: 5px;
+        background: var(--mantine-color-default);
+        color: var(--mantine-color-text);
+        font-size: 0.78rem; font-family: inherit; cursor: pointer;
       }
-      .tv-pill:hover { background: var(--mantine-color-default-hover); }
-      .tv-pill-yes { background: var(--mantine-color-blue-filled);  color: #fff; border-color: var(--mantine-color-blue-filled); }
-      .tv-pill-no  { background: var(--mantine-color-red-filled);   color: #fff; border-color: var(--mantine-color-red-filled); }
 
       /* ── Status bar ── */
       .tv-status { padding: 4px 12px; font-size: 0.76rem; color: var(--mantine-color-dimmed); }
@@ -1404,7 +1475,7 @@ class TileView {
         font-size: 0.77rem; font-weight: 600;
         margin-left: 8px; flex-shrink: 0;
       }
-      /* Separator between pill groups */
+      /* Separator — kept for compatibility, no longer used in panels */
       .tv-sub-sep {
         width: 1px; height: 18px; margin: 0 4px;
         background: var(--mantine-color-default-border);
